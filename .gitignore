@@ -1,0 +1,12 @@
+node_modules/
+*.log
+.DS_Store
+*.db
+*.db-journal
+
+# Local test data
+.claude-guard/
+
+# IDE
+.vscode/
+.idea/
