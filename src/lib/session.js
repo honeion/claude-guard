@@ -49,7 +49,21 @@ export async function initSession(sessionId, projectPath) {
     return { isNew: true, session: await getSession(sessionId) };
   }
 
-  return { isNew: false, session: existing };
+  // Resume existing session - reactivate if completed/crashed
+  if (existing.status !== 'active') {
+    await updateSession(sessionId, { status: 'active', ended_at: null });
+
+    // Update meta.json
+    const metaPath = join(getSessionDir(sessionId), 'meta.json');
+    if (existsSync(metaPath)) {
+      const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
+      meta.status = 'active';
+      meta.resumed_at = new Date().toISOString();
+      writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+    }
+  }
+
+  return { isNew: false, session: await getSession(sessionId) };
 }
 
 // Save current turn state (called on every PostToolUse)
