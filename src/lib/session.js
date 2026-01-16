@@ -50,17 +50,38 @@ export async function initSession(sessionId, projectPath) {
   }
 
   // Resume existing session - reactivate if completed/crashed
+  const sessionDir = ensureSessionDir(sessionId);
+
   if (existing.status !== 'active') {
     await updateSession(sessionId, { status: 'active', ended_at: null });
 
     // Update meta.json
-    const metaPath = join(getSessionDir(sessionId), 'meta.json');
+    const metaPath = join(sessionDir, 'meta.json');
     if (existsSync(metaPath)) {
       const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
       meta.status = 'active';
       meta.resumed_at = new Date().toISOString();
       writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+    } else {
+      // Create meta.json if missing
+      writeFileSync(metaPath, JSON.stringify({
+        session_id: sessionId,
+        project_path: projectPath,
+        started_at: new Date(existing.started_at).toISOString(),
+        resumed_at: new Date().toISOString(),
+        status: 'active'
+      }, null, 2));
     }
+  }
+
+  // Ensure tokens.json exists
+  const tokensPath = join(sessionDir, 'tokens.json');
+  if (!existsSync(tokensPath)) {
+    writeFileSync(tokensPath, JSON.stringify({
+      total_input: 0,
+      total_output: 0,
+      turns: []
+    }, null, 2));
   }
 
   return { isNew: false, session: await getSession(sessionId) };
