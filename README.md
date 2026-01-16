@@ -141,6 +141,20 @@ Claude Code의 Hook 시스템을 활용합니다.
 - Node.js 18+
 - Claude Code CLI
 
+## 알려진 제한사항
+
+- **output_tokens 정확도**: Claude Code transcript에 스트리밍 중간값만 저장되어 output 토큰 수치가 실제보다 낮게 나올 수 있음. input_tokens는 정확함.
+
+## 변경 로그
+
+### v0.1.1
+- **성능 개선**: PostToolUse에서 토큰 파싱 제거, Stop hook에서 한 번만 계산
+- **버그 수정**: crash 감지 로직 보수적으로 변경 (10분 이상 + current.json 있는 경우만)
+- **버그 수정**: 에러 시 process.exit 대신 continue: true 반환
+
+### v0.1.0
+- 초기 릴리즈
+
 ## 라이센스
 
 MIT
