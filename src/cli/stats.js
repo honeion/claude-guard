@@ -3,19 +3,20 @@
  */
 
 import { getSessionStats, getPeriodStats, getTotalStats, getDailyBreakdown, formatStats } from '../lib/token-tracker.js';
-import { db } from '../lib/db.js';
+import { initDb, getSession, getRecentSessions } from '../lib/db.js';
 
 export async function stats(args) {
+  await initDb();
   const options = parseArgs(args);
 
   if (options.session) {
-    showSessionStats(options.session);
+    await showSessionStats(options.session);
   } else if (options.period) {
-    showPeriodStats(options.period);
+    await showPeriodStats(options.period);
   } else if (options.daily) {
-    showDailyBreakdown(parseInt(options.daily) || 7);
+    await showDailyBreakdown(parseInt(options.daily) || 7);
   } else {
-    showTotalStats();
+    await showTotalStats();
   }
 }
 
@@ -35,52 +36,49 @@ function parseArgs(args) {
   return options;
 }
 
-function showSessionStats(sessionId) {
-  const session = db.prepare('SELECT * FROM sessions WHERE id LIKE ?').get(`${sessionId}%`);
+async function showSessionStats(sessionId) {
+  const { initDb } = await import('../lib/db.js');
+  await initDb();
+
+  // Find session with partial ID match
+  const sessions = await getRecentSessions(100);
+  const session = sessions.find(s => s.id.startsWith(sessionId));
 
   if (!session) {
-    console.log(`Session not found: ${sessionId}`);
+    console.log(`세션을 찾을 수 없음: ${sessionId}`);
     return;
   }
 
-  console.log('\n=== Session Stats ===\n');
-  console.log(`Session ID: ${session.id}`);
-  console.log(`Project: ${session.project_path || 'N/A'}`);
-  console.log(`Status: ${session.status}`);
-  console.log(`Started: ${new Date(session.started_at).toLocaleString()}`);
-  if (session.ended_at) {
-    console.log(`Ended: ${new Date(session.ended_at).toLocaleString()}`);
-  }
-  console.log(`Total Turns: ${session.total_turns}`);
+  console.log('\n=== 세션 통계 ===\n');
+  console.log(`세션 ID: ${session.id}`);
+  console.log(`프로젝트: ${session.project_path || 'N/A'}`);
+  console.log(`상태: ${session.status}`);
+  console.log(`시작: ${new Date(session.started_at).toLocaleString()}`);
+  console.log(`총 턴: ${session.total_turns}`);
   console.log('');
 
-  const stats = getSessionStats(session.id);
+  const stats = await getSessionStats(session.id);
   console.log(formatStats(stats));
 }
 
-function showPeriodStats(period) {
-  console.log(`\n=== ${period.charAt(0).toUpperCase() + period.slice(1)} Stats ===\n`);
+async function showPeriodStats(period) {
+  console.log(`\n=== ${period} 통계 ===\n`);
 
-  const stats = getPeriodStats(period);
+  const stats = await getPeriodStats(period);
   console.log(formatStats(stats));
 }
 
-function showTotalStats() {
-  console.log('\n=== Total Stats ===\n');
+async function showTotalStats() {
+  console.log('\n=== 전체 통계 ===\n');
 
-  const stats = getTotalStats();
+  const stats = await getTotalStats();
   console.log(formatStats(stats));
 
   // Show recent sessions
-  const recentSessions = db.prepare(`
-    SELECT id, project_path, status, started_at, total_turns
-    FROM sessions
-    ORDER BY started_at DESC
-    LIMIT 5
-  `).all();
+  const recentSessions = await getRecentSessions(5);
 
   if (recentSessions.length > 0) {
-    console.log('\n--- Recent Sessions ---\n');
+    console.log('\n--- 최근 세션 ---\n');
 
     for (const s of recentSessions) {
       const date = new Date(s.started_at).toLocaleString();
@@ -90,10 +88,10 @@ function showTotalStats() {
   }
 }
 
-function showDailyBreakdown(days) {
-  console.log(`\n=== Daily Breakdown (Last ${days} days) ===\n`);
+async function showDailyBreakdown(days) {
+  console.log(`\n=== 일별 통계 (최근 ${days}일) ===\n`);
 
-  const breakdown = getDailyBreakdown(days);
+  const breakdown = await getDailyBreakdown(days);
 
   console.log('Date        | Turns | Input    | Output   | Total    | Cost');
   console.log('------------|-------|----------|----------|----------|-------');

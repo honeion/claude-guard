@@ -4,35 +4,37 @@
 
 import { existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import { db, getSummaries } from '../lib/db.js';
+import { initDb, getSummaries, getRecentSessions, GUARD_DIR } from '../lib/db.js';
 import { getTokenUsage } from '../lib/session.js';
 
 export async function exportSession(args) {
+  await initDb();
   const options = parseArgs(args);
 
   // Find session
   let session;
+  const recentSessions = await getRecentSessions(100);
+
   if (options.session) {
-    session = db.prepare('SELECT * FROM sessions WHERE id LIKE ?').get(`${options.session}%`);
+    session = recentSessions.find(s => s.id.startsWith(options.session));
   } else {
     // Get most recent session
-    session = db.prepare('SELECT * FROM sessions ORDER BY started_at DESC LIMIT 1').get();
+    session = recentSessions[0];
   }
 
   if (!session) {
-    console.log('No session found to export');
+    console.log('내보낼 세션이 없습니다');
     return;
   }
 
   // Generate markdown
-  const md = generateMarkdown(session, options.name);
+  const md = await generateMarkdown(session, options.name);
 
   // Determine output path
   let outputDir;
   if (options.here) {
     outputDir = join(process.cwd(), '.claude-guard', 'exports');
   } else {
-    const { GUARD_DIR } = await import('../lib/db.js');
     outputDir = join(GUARD_DIR, 'exports');
   }
 
@@ -47,7 +49,7 @@ export async function exportSession(args) {
   const outputPath = join(outputDir, filename);
   writeFileSync(outputPath, md);
 
-  console.log(`Exported: ${outputPath}`);
+  console.log(`내보내기 완료: ${outputPath}`);
 }
 
 function parseArgs(args) {
@@ -70,32 +72,29 @@ function sanitizeFilename(name) {
   return name.replace(/[^a-zA-Z0-9가-힣_-]/g, '_');
 }
 
-function generateMarkdown(session, customName) {
-  const summaries = getSummaries(session.id);
+async function generateMarkdown(session, customName) {
+  const summaries = await getSummaries(session.id);
   const tokens = getTokenUsage(session.id);
 
   const projectName = session.project_path?.split(/[/\\]/).pop() || 'Unknown Project';
-  const title = customName || `Session: ${projectName}`;
+  const title = customName || `세션: ${projectName}`;
 
   let md = `# ${title}\n\n`;
 
   // Metadata
-  md += `- **Session ID**: \`${session.id}\`\n`;
-  md += `- **Project**: \`${session.project_path || 'N/A'}\`\n`;
-  md += `- **Status**: ${session.status}\n`;
-  md += `- **Started**: ${new Date(session.started_at).toLocaleString()}\n`;
-  if (session.ended_at) {
-    md += `- **Ended**: ${new Date(session.ended_at).toLocaleString()}\n`;
-  }
-  md += `- **Total Turns**: ${session.total_turns}\n`;
-  md += `- **Total Tokens**: ${(tokens.total_input + tokens.total_output).toLocaleString()} (input: ${tokens.total_input.toLocaleString()} / output: ${tokens.total_output.toLocaleString()})\n`;
+  md += `- **세션 ID**: \`${session.id}\`\n`;
+  md += `- **프로젝트**: \`${session.project_path || 'N/A'}\`\n`;
+  md += `- **상태**: ${session.status}\n`;
+  md += `- **시작**: ${new Date(session.started_at).toLocaleString()}\n`;
+  md += `- **총 턴**: ${session.total_turns}\n`;
+  md += `- **총 토큰**: ${(tokens.total_input + tokens.total_output).toLocaleString()} (input: ${tokens.total_input.toLocaleString()} / output: ${tokens.total_output.toLocaleString()})\n`;
   md += `\n---\n\n`;
 
   // Work flow
-  md += `## Work Flow\n\n`;
+  md += `## 작업 흐름\n\n`;
 
   if (summaries.length === 0) {
-    md += `_No summaries recorded_\n\n`;
+    md += `_기록된 요약 없음_\n\n`;
   } else {
     for (const s of summaries) {
       const filesRead = JSON.parse(s.files_read || '[]');
@@ -105,28 +104,25 @@ function generateMarkdown(session, customName) {
       md += `${s.summary}\n\n`;
 
       if (filesRead.length > 0) {
-        md += `- **Read**: ${filesRead.map(f => `\`${f.split(/[/\\]/).pop()}\``).join(', ')}\n`;
+        md += `- **읽음**: ${filesRead.map(f => `\`${f.split(/[/\\]/).pop()}\``).join(', ')}\n`;
       }
       if (filesModified.length > 0) {
-        md += `- **Modified**: ${filesModified.map(f => `\`${f.split(/[/\\]/).pop()}\``).join(', ')}\n`;
+        md += `- **수정함**: ${filesModified.map(f => `\`${f.split(/[/\\]/).pop()}\``).join(', ')}\n`;
       }
-      md += `- **Tokens**: ${s.tokens_used.toLocaleString()}\n\n`;
+      md += `- **토큰**: ${s.tokens_used.toLocaleString()}\n\n`;
     }
   }
 
   // Files summary
-  const allFilesRead = new Set();
   const allFilesModified = new Set();
 
   for (const s of summaries) {
-    const fr = JSON.parse(s.files_read || '[]');
     const fm = JSON.parse(s.files_modified || '[]');
-    fr.forEach(f => allFilesRead.add(f));
     fm.forEach(f => allFilesModified.add(f));
   }
 
   if (allFilesModified.size > 0) {
-    md += `---\n\n## Modified Files\n\n`;
+    md += `---\n\n## 수정된 파일\n\n`;
     for (const f of allFilesModified) {
       md += `- \`${f}\`\n`;
     }
@@ -134,12 +130,12 @@ function generateMarkdown(session, customName) {
   }
 
   // Token breakdown
-  md += `---\n\n## Token Usage\n\n`;
-  md += `| Metric | Value |\n`;
-  md += `|--------|-------|\n`;
-  md += `| Input Tokens | ${tokens.total_input.toLocaleString()} |\n`;
-  md += `| Output Tokens | ${tokens.total_output.toLocaleString()} |\n`;
-  md += `| Total Tokens | ${(tokens.total_input + tokens.total_output).toLocaleString()} |\n`;
+  md += `---\n\n## 토큰 사용량\n\n`;
+  md += `| 항목 | 값 |\n`;
+  md += `|------|----|\n`;
+  md += `| Input 토큰 | ${tokens.total_input.toLocaleString()} |\n`;
+  md += `| Output 토큰 | ${tokens.total_output.toLocaleString()} |\n`;
+  md += `| 총 토큰 | ${(tokens.total_input + tokens.total_output).toLocaleString()} |\n`;
   md += `\n`;
 
   // Footer

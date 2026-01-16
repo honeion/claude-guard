@@ -2,7 +2,7 @@
  * Token tracking utilities
  */
 
-import { db, getTokenStats, addTokenUsage } from './db.js';
+import { initDb, getTokenStats, addTokenUsage, getSessionCount, getRecentSessions } from './db.js';
 
 // Pricing per 1M tokens (Claude 3.5 Sonnet estimates)
 const PRICING = {
@@ -27,13 +27,13 @@ export function calculateCost(inputTokens, outputTokens, model = 'default') {
 }
 
 // Track token usage
-export function trackTokens(sessionId, turn, inputTokens, outputTokens, model) {
-  addTokenUsage(sessionId, turn, inputTokens, outputTokens, model);
+export async function trackTokens(sessionId, turn, inputTokens, outputTokens, model) {
+  await addTokenUsage(sessionId, turn, inputTokens, outputTokens, model);
 }
 
 // Get stats for a session
-export function getSessionStats(sessionId) {
-  const stats = getTokenStats(sessionId);
+export async function getSessionStats(sessionId) {
+  const stats = await getTokenStats(sessionId);
   const cost = calculateCost(stats.total_input || 0, stats.total_output || 0);
 
   return {
@@ -43,7 +43,7 @@ export function getSessionStats(sessionId) {
 }
 
 // Get stats for a time period
-export function getPeriodStats(period = 'day') {
+export async function getPeriodStats(period = 'day') {
   const now = Date.now();
   let fromDate;
 
@@ -61,7 +61,7 @@ export function getPeriodStats(period = 'day') {
       fromDate = 0;
   }
 
-  const stats = getTokenStats(null, fromDate, now);
+  const stats = await getTokenStats(null, fromDate, now);
   const cost = calculateCost(stats.total_input || 0, stats.total_output || 0);
 
   return {
@@ -72,12 +72,10 @@ export function getPeriodStats(period = 'day') {
 }
 
 // Get all-time stats
-export function getTotalStats() {
-  const stats = getTokenStats();
+export async function getTotalStats() {
+  const stats = await getTokenStats();
   const cost = calculateCost(stats.total_input || 0, stats.total_output || 0);
-
-  // Get session count
-  const sessionCount = db.prepare('SELECT COUNT(*) as count FROM sessions').get().count;
+  const sessionCount = await getSessionCount();
 
   return {
     sessions: sessionCount,
@@ -87,7 +85,7 @@ export function getTotalStats() {
 }
 
 // Get daily breakdown
-export function getDailyBreakdown(days = 7) {
+export async function getDailyBreakdown(days = 7) {
   const results = [];
   const now = Date.now();
   const dayMs = 24 * 60 * 60 * 1000;
@@ -96,7 +94,7 @@ export function getDailyBreakdown(days = 7) {
     const dayStart = now - ((i + 1) * dayMs);
     const dayEnd = now - (i * dayMs);
 
-    const stats = getTokenStats(null, dayStart, dayEnd);
+    const stats = await getTokenStats(null, dayStart, dayEnd);
     const cost = calculateCost(stats.total_input || 0, stats.total_output || 0);
 
     results.push({

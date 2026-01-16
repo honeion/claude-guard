@@ -25,7 +25,7 @@ async function main() {
   const { session_id, cwd, source } = event;
 
   // Check for crashed sessions (not this one)
-  const activeSessions = getActiveSessions();
+  const activeSessions = await getActiveSessions();
   const crashedSessions = activeSessions.filter(s => {
     if (s.id === session_id) return false;
 
@@ -41,11 +41,11 @@ async function main() {
 
   // Mark crashed sessions
   for (const crashed of crashedSessions) {
-    markSessionCrashed(crashed.id);
+    await markSessionCrashed(crashed.id);
   }
 
   // Initialize current session
-  const { isNew, session } = initSession(session_id, cwd);
+  const { isNew, session } = await initSession(session_id, cwd);
 
   // Build output
   const output = {
@@ -58,13 +58,13 @@ async function main() {
   // If there was a crash, inject recovery context
   if (crashedSessions.length > 0) {
     const lastCrashed = crashedSessions[crashedSessions.length - 1];
-    const recoveryContext = buildRecoveryContext(lastCrashed.id);
+    const recoveryContext = await buildRecoveryContext(lastCrashed.id);
 
     if (recoveryContext) {
       output.hookSpecificOutput.additionalContext = recoveryContext;
 
       // Also output to stderr for user visibility
-      console.error(`\n[claude-guard] Recovered from crashed session: ${lastCrashed.id.slice(0, 8)}...\n`);
+      console.error(`\n[claude-guard] 이전 세션 복구: ${lastCrashed.id.slice(0, 8)}...\n`);
     }
   }
 

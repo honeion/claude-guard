@@ -22,11 +22,11 @@ async function main() {
   const event = JSON.parse(input);
   const { session_id, reason } = event;
 
-  const session = getSession(session_id);
+  const session = await getSession(session_id);
 
   if (session && session.status === 'active') {
     // Mark as completed if still active
-    markSessionCompleted(session_id);
+    await markSessionCompleted(session_id);
   }
 
   // Output success

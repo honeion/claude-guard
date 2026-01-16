@@ -8,7 +8,7 @@
  */
 
 import { updateSession, addSummary, getSession } from '../lib/db.js';
-import { saveCurrentState, appendSummary as appendSummaryToFile, getCurrentState } from '../lib/session.js';
+import { saveCurrentState, appendSummary as appendSummaryToFile } from '../lib/session.js';
 import { updateTokenUsage } from '../lib/session.js';
 import { generateSummary, shouldSummarize, SUMMARY_INTERVAL } from '../lib/summarizer.js';
 import { trackTokens } from '../lib/token-tracker.js';
@@ -37,7 +37,7 @@ async function main() {
   } = event;
 
   // Get current session
-  const session = getSession(session_id);
+  const session = await getSession(session_id);
   if (!session) {
     // Session not initialized, skip
     console.log(JSON.stringify({ continue: true }));
@@ -53,7 +53,7 @@ async function main() {
 
   // Track tokens in DB
   if (inputTokens > 0 || outputTokens > 0) {
-    trackTokens(session_id, currentTurn, inputTokens, outputTokens, model);
+    await trackTokens(session_id, currentTurn, inputTokens, outputTokens, model);
     updateTokenUsage(session_id, currentTurn, inputTokens, outputTokens);
   }
 
@@ -69,7 +69,7 @@ async function main() {
     output_tokens: outputTokens
   };
 
-  saveCurrentState(session_id, currentState);
+  await saveCurrentState(session_id, currentState);
 
   // Add to turn buffer for summarization
   turnBuffer.push({
@@ -95,7 +95,7 @@ async function main() {
 
       // Save to file and DB
       appendSummaryToFile(session_id, summary);
-      addSummary(
+      await addSummary(
         session_id,
         turnStart,
         turnEnd,
@@ -106,7 +106,7 @@ async function main() {
       );
 
       // Update last summary turn
-      updateSession(session_id, { last_summary_turn: turnEnd });
+      await updateSession(session_id, { last_summary_turn: turnEnd });
 
       // Clear processed turns from buffer
       turnBuffer.length = 0;

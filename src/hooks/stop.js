@@ -8,7 +8,6 @@
 
 import { getSession, updateSession, markSessionCompleted, addSummary } from '../lib/db.js';
 import { getCurrentState, appendSummary as appendSummaryToFile } from '../lib/session.js';
-import { generateSummary } from '../lib/summarizer.js';
 
 // Force UTF-8
 process.env.LANG = 'ko_KR.UTF-8';
@@ -24,7 +23,7 @@ async function main() {
   const event = JSON.parse(input);
   const { session_id } = event;
 
-  const session = getSession(session_id);
+  const session = await getSession(session_id);
   if (!session) {
     console.log(JSON.stringify({ continue: true }));
     return;
@@ -43,8 +42,8 @@ async function main() {
     const summary = {
       turns: `${turnStart}-${turnEnd}`,
       summary: currentState?.last_tool
-        ? `Final: ${currentState.last_tool} on ${currentState.last_tool_input?.file_path || 'unknown'}`
-        : 'Session ended',
+        ? `최종: ${currentState.last_tool}`
+        : '세션 종료',
       files_read: [],
       files_modified: currentState?.last_tool_input?.file_path
         ? [currentState.last_tool_input.file_path]
@@ -54,7 +53,7 @@ async function main() {
     };
 
     appendSummaryToFile(session_id, summary);
-    addSummary(
+    await addSummary(
       session_id,
       turnStart,
       turnEnd,
@@ -66,7 +65,7 @@ async function main() {
   }
 
   // Mark session as completed
-  markSessionCompleted(session_id);
+  await markSessionCompleted(session_id);
 
   console.log(JSON.stringify({ continue: true }));
 }

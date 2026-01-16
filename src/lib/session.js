@@ -22,11 +22,11 @@ export function ensureSessionDir(sessionId) {
 }
 
 // Initialize or resume a session
-export function initSession(sessionId, projectPath) {
-  const existing = getSession(sessionId);
+export async function initSession(sessionId, projectPath) {
+  const existing = await getSession(sessionId);
 
   if (!existing) {
-    createSession(sessionId, projectPath);
+    await createSession(sessionId, projectPath);
     ensureSessionDir(sessionId);
 
     // Create initial meta.json
@@ -46,14 +46,14 @@ export function initSession(sessionId, projectPath) {
       turns: []
     }, null, 2));
 
-    return { isNew: true, session: getSession(sessionId) };
+    return { isNew: true, session: await getSession(sessionId) };
   }
 
   return { isNew: false, session: existing };
 }
 
 // Save current turn state (called on every PostToolUse)
-export function saveCurrentState(sessionId, state) {
+export async function saveCurrentState(sessionId, state) {
   const dir = ensureSessionDir(sessionId);
   const currentPath = join(dir, 'current.json');
 
@@ -63,7 +63,7 @@ export function saveCurrentState(sessionId, state) {
   }, null, 2));
 
   // Update turn count in DB
-  updateSession(sessionId, { total_turns: state.turn });
+  await updateSession(sessionId, { total_turns: state.turn });
 }
 
 // Get current state
@@ -135,37 +135,20 @@ export function getTokenUsage(sessionId) {
   return JSON.parse(readFileSync(tokensPath, 'utf8'));
 }
 
-// Check for crashed sessions (active but no recent update)
-export function findCrashedSessions() {
-  const { getActiveSessions } = require('./db.js');
-  const activeSessions = getActiveSessions();
-
-  return activeSessions.filter(session => {
-    const current = getCurrentState(session.id);
-    if (!current) return true; // No current state = definitely crashed
-
-    // Consider crashed if last update > 5 minutes ago and still active
-    const lastUpdate = new Date(current.updated_at).getTime();
-    const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
-
-    return lastUpdate < fiveMinutesAgo;
-  });
-}
-
 // Build recovery context for a crashed session
-export function buildRecoveryContext(sessionId) {
-  const session = getSession(sessionId);
+export async function buildRecoveryContext(sessionId) {
+  const session = await getSession(sessionId);
   const summaries = getSummariesFromFile(sessionId);
   const current = getCurrentState(sessionId);
   const tokens = getTokenUsage(sessionId);
 
   if (!session) return null;
 
-  let context = `[Session Recovery - Abnormal Termination Detected]\n\n`;
+  let context = `[세션 복구 - 비정상 종료 감지됨]\n\n`;
 
   // Add summary history
   if (summaries.length > 0) {
-    context += `## Work History:\n`;
+    context += `## 작업 히스토리:\n`;
     summaries.forEach(s => {
       context += `- Turn ${s.turns}: ${s.summary}\n`;
     });
@@ -174,15 +157,15 @@ export function buildRecoveryContext(sessionId) {
 
   // Add last state
   if (current) {
-    context += `## Last State (Turn ${current.turn}):\n`;
-    context += `- Request: ${current.last_user_message || 'N/A'}\n`;
-    context += `- Last Tool: ${current.last_tool || 'N/A'}\n`;
-    context += `- Status: Interrupted\n\n`;
+    context += `## 마지막 상태 (Turn ${current.turn}):\n`;
+    context += `- 요청: ${current.last_user_message || 'N/A'}\n`;
+    context += `- 마지막 도구: ${current.last_tool || 'N/A'}\n`;
+    context += `- 상태: 중단됨\n\n`;
   }
 
   // Add token stats
-  context += `## Token Usage: ${tokens.total_input + tokens.total_output} (input: ${tokens.total_input} / output: ${tokens.total_output})\n\n`;
-  context += `Continue from where you left off based on the context above.`;
+  context += `## 토큰 사용량: ${tokens.total_input + tokens.total_output} (input: ${tokens.total_input} / output: ${tokens.total_output})\n\n`;
+  context += `위 컨텍스트를 바탕으로 작업을 이어가세요.`;
 
   return context;
 }

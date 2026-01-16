@@ -5,12 +5,12 @@
 import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
-import { db, GUARD_DIR } from '../lib/db.js';
+import { initDb, GUARD_DIR, getSessionCount, getTokenStats, getRecentSessions } from '../lib/db.js';
 
 const CLAUDE_SETTINGS_FILE = join(homedir(), '.claude', 'settings.json');
 
 export async function status() {
-  console.log('\n=== claude-guard Status ===\n');
+  console.log('\n=== claude-guard 상태 ===\n');
 
   // Check if hooks are enabled
   let hooksEnabled = false;
@@ -30,34 +30,31 @@ export async function status() {
     }
   }
 
-  console.log(`Hooks: ${hooksEnabled ? 'Enabled' : 'Disabled'}`);
-  console.log(`Data Directory: ${GUARD_DIR}`);
+  console.log(`Hooks: ${hooksEnabled ? '활성화됨' : '비활성화됨'}`);
+  console.log(`데이터 디렉토리: ${GUARD_DIR}`);
 
-  // Session stats
-  const totalSessions = db.prepare('SELECT COUNT(*) as count FROM sessions').get().count;
-  const activeSessions = db.prepare('SELECT COUNT(*) as count FROM sessions WHERE status = ?').get('active').count;
-  const crashedSessions = db.prepare('SELECT COUNT(*) as count FROM sessions WHERE status = ?').get('crashed').count;
+  // Initialize DB and get stats
+  await initDb();
 
-  console.log(`\nSessions:`);
-  console.log(`  Total: ${totalSessions}`);
-  console.log(`  Active: ${activeSessions}`);
-  console.log(`  Crashed: ${crashedSessions}`);
+  const totalSessions = await getSessionCount();
+  const recentSessions = await getRecentSessions(100);
+  const activeSessions = recentSessions.filter(s => s.status === 'active').length;
+  const crashedSessions = recentSessions.filter(s => s.status === 'crashed').length;
+
+  console.log(`\n세션:`);
+  console.log(`  전체: ${totalSessions}`);
+  console.log(`  활성: ${activeSessions}`);
+  console.log(`  크래시: ${crashedSessions}`);
 
   // Token stats
-  const tokenStats = db.prepare(`
-    SELECT
-      SUM(input_tokens) as total_input,
-      SUM(output_tokens) as total_output
-    FROM token_usage
-  `).get();
-
+  const tokenStats = await getTokenStats();
   const totalTokens = (tokenStats.total_input || 0) + (tokenStats.total_output || 0);
 
-  console.log(`\nTokens Tracked: ${totalTokens.toLocaleString()}`);
+  console.log(`\n추적된 토큰: ${totalTokens.toLocaleString()}`);
 
   // Recent activity
-  const lastSession = db.prepare('SELECT * FROM sessions ORDER BY started_at DESC LIMIT 1').get();
+  const lastSession = recentSessions[0];
   if (lastSession) {
-    console.log(`\nLast Session: ${new Date(lastSession.started_at).toLocaleString()}`);
+    console.log(`\n마지막 세션: ${new Date(lastSession.started_at).toLocaleString()}`);
   }
 }

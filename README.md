@@ -53,6 +53,9 @@ npm install
 npm link
 ```
 
+- 네이티브 빌드 불필요 (sql.js 사용)
+- Visual Studio, Python 등 추가 설치 없음
+
 ## 사용법
 
 ```bash
