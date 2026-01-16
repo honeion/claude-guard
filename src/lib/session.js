@@ -5,8 +5,12 @@ import { GUARD_DIR, getSession, createSession, updateSession } from './db.js';
 const SESSIONS_DIR = join(GUARD_DIR, 'sessions');
 
 // Ensure sessions directory exists
-if (!existsSync(SESSIONS_DIR)) {
-  mkdirSync(SESSIONS_DIR, { recursive: true });
+try {
+  if (!existsSync(SESSIONS_DIR)) {
+    mkdirSync(SESSIONS_DIR, { recursive: true });
+  }
+} catch (e) {
+  // Ignore - will fail later if really broken
 }
 
 export function getSessionDir(sessionId) {
@@ -15,192 +19,247 @@ export function getSessionDir(sessionId) {
 
 export function ensureSessionDir(sessionId) {
   const dir = getSessionDir(sessionId);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+  try {
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+  } catch (e) {
+    // Ignore
   }
   return dir;
 }
 
-// Initialize or resume a session
-export async function initSession(sessionId, projectPath) {
-  const existing = await getSession(sessionId);
-
-  if (!existing) {
-    await createSession(sessionId, projectPath);
-    ensureSessionDir(sessionId);
-
-    // Create initial meta.json
-    const metaPath = join(getSessionDir(sessionId), 'meta.json');
-    writeFileSync(metaPath, JSON.stringify({
-      session_id: sessionId,
-      project_path: projectPath,
-      started_at: new Date().toISOString(),
-      status: 'active'
-    }, null, 2));
-
-    // Create empty tokens.json
-    const tokensPath = join(getSessionDir(sessionId), 'tokens.json');
-    writeFileSync(tokensPath, JSON.stringify({
-      total_input: 0,
-      total_output: 0,
-      turns: []
-    }, null, 2));
-
-    return { isNew: true, session: await getSession(sessionId) };
+// Safe JSON parse with fallback
+function safeJsonParse(str, fallback = null) {
+  try {
+    return JSON.parse(str);
+  } catch {
+    return fallback;
   }
-
-  // Resume existing session - reactivate if completed/crashed
-  const sessionDir = ensureSessionDir(sessionId);
-
-  if (existing.status !== 'active') {
-    await updateSession(sessionId, { status: 'active', ended_at: null });
-
-    // Update meta.json
-    const metaPath = join(sessionDir, 'meta.json');
-    if (existsSync(metaPath)) {
-      const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
-      meta.status = 'active';
-      meta.resumed_at = new Date().toISOString();
-      writeFileSync(metaPath, JSON.stringify(meta, null, 2));
-    } else {
-      // Create meta.json if missing
-      writeFileSync(metaPath, JSON.stringify({
-        session_id: sessionId,
-        project_path: projectPath,
-        started_at: new Date(existing.started_at).toISOString(),
-        resumed_at: new Date().toISOString(),
-        status: 'active'
-      }, null, 2));
-    }
-  }
-
-  // Ensure tokens.json exists
-  const tokensPath = join(sessionDir, 'tokens.json');
-  if (!existsSync(tokensPath)) {
-    writeFileSync(tokensPath, JSON.stringify({
-      total_input: 0,
-      total_output: 0,
-      turns: []
-    }, null, 2));
-  }
-
-  return { isNew: false, session: await getSession(sessionId) };
 }
 
-// Save current turn state (called on every PostToolUse)
+// Safe file read with fallback
+function safeReadJson(path, fallback = null) {
+  try {
+    if (!existsSync(path)) return fallback;
+    const content = readFileSync(path, 'utf8');
+    if (!content || !content.trim()) return fallback;
+    return JSON.parse(content);
+  } catch {
+    return fallback;
+  }
+}
+
+// Safe file write
+function safeWriteJson(path, data) {
+  try {
+    writeFileSync(path, JSON.stringify(data, null, 2));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Initialize or resume a session
+export async function initSession(sessionId, projectPath) {
+  try {
+    const existing = await getSession(sessionId);
+
+    if (!existing) {
+      await createSession(sessionId, projectPath);
+      ensureSessionDir(sessionId);
+
+      const metaPath = join(getSessionDir(sessionId), 'meta.json');
+      safeWriteJson(metaPath, {
+        session_id: sessionId,
+        project_path: projectPath,
+        started_at: new Date().toISOString(),
+        status: 'active'
+      });
+
+      const tokensPath = join(getSessionDir(sessionId), 'tokens.json');
+      safeWriteJson(tokensPath, {
+        total_input: 0,
+        total_output: 0,
+        turns: []
+      });
+
+      return { isNew: true, session: await getSession(sessionId) };
+    }
+
+    // Resume existing session
+    const sessionDir = ensureSessionDir(sessionId);
+
+    if (existing.status !== 'active') {
+      await updateSession(sessionId, { status: 'active', ended_at: null });
+
+      const metaPath = join(sessionDir, 'meta.json');
+      const meta = safeReadJson(metaPath, null);
+
+      if (meta) {
+        meta.status = 'active';
+        meta.resumed_at = new Date().toISOString();
+        safeWriteJson(metaPath, meta);
+      } else {
+        safeWriteJson(metaPath, {
+          session_id: sessionId,
+          project_path: projectPath,
+          started_at: existing.started_at ? new Date(existing.started_at).toISOString() : new Date().toISOString(),
+          resumed_at: new Date().toISOString(),
+          status: 'active'
+        });
+      }
+    }
+
+    // Ensure tokens.json exists
+    const tokensPath = join(sessionDir, 'tokens.json');
+    if (!existsSync(tokensPath)) {
+      safeWriteJson(tokensPath, {
+        total_input: 0,
+        total_output: 0,
+        turns: []
+      });
+    }
+
+    return { isNew: false, session: await getSession(sessionId) };
+  } catch (e) {
+    // Return minimal valid response on error
+    return { isNew: true, session: null };
+  }
+}
+
+// Save current turn state
 export async function saveCurrentState(sessionId, state) {
-  const dir = ensureSessionDir(sessionId);
-  const currentPath = join(dir, 'current.json');
+  try {
+    const dir = ensureSessionDir(sessionId);
+    const currentPath = join(dir, 'current.json');
 
-  writeFileSync(currentPath, JSON.stringify({
-    ...state,
-    updated_at: new Date().toISOString()
-  }, null, 2));
+    safeWriteJson(currentPath, {
+      ...state,
+      updated_at: new Date().toISOString()
+    });
 
-  // Update turn count in DB
-  await updateSession(sessionId, { total_turns: state.turn });
+    await updateSession(sessionId, { total_turns: state.turn || 0 });
+  } catch {
+    // Ignore errors - non-critical
+  }
 }
 
 // Get current state
 export function getCurrentState(sessionId) {
   const currentPath = join(getSessionDir(sessionId), 'current.json');
-
-  if (existsSync(currentPath)) {
-    return JSON.parse(readFileSync(currentPath, 'utf8'));
-  }
-
-  return null;
+  return safeReadJson(currentPath, null);
 }
 
 // Append summary to summaries.jsonl
 export function appendSummary(sessionId, summary) {
-  const dir = ensureSessionDir(sessionId);
-  const summariesPath = join(dir, 'summaries.jsonl');
-
-  appendFileSync(summariesPath, JSON.stringify(summary) + '\n');
+  try {
+    const dir = ensureSessionDir(sessionId);
+    const summariesPath = join(dir, 'summaries.jsonl');
+    appendFileSync(summariesPath, JSON.stringify(summary) + '\n');
+  } catch {
+    // Ignore
+  }
 }
 
 // Get all summaries for a session
 export function getSummariesFromFile(sessionId) {
-  const summariesPath = join(getSessionDir(sessionId), 'summaries.jsonl');
+  try {
+    const summariesPath = join(getSessionDir(sessionId), 'summaries.jsonl');
+    if (!existsSync(summariesPath)) return [];
 
-  if (!existsSync(summariesPath)) {
+    const content = readFileSync(summariesPath, 'utf8');
+    if (!content || !content.trim()) return [];
+
+    return content
+      .split('\n')
+      .filter(line => line.trim())
+      .map(line => safeJsonParse(line, null))
+      .filter(item => item !== null);
+  } catch {
     return [];
   }
-
-  const content = readFileSync(summariesPath, 'utf8');
-  return content
-    .split('\n')
-    .filter(line => line.trim())
-    .map(line => JSON.parse(line));
 }
 
 // Update token usage in session file
 export function updateTokenUsage(sessionId, turn, inputTokens, outputTokens) {
-  const tokensPath = join(getSessionDir(sessionId), 'tokens.json');
+  try {
+    const tokensPath = join(getSessionDir(sessionId), 'tokens.json');
+    let tokens = safeReadJson(tokensPath, { total_input: 0, total_output: 0, turns: [] });
 
-  let tokens = { total_input: 0, total_output: 0, turns: [] };
+    // Ensure valid structure
+    if (!tokens || typeof tokens !== 'object') {
+      tokens = { total_input: 0, total_output: 0, turns: [] };
+    }
+    if (!Array.isArray(tokens.turns)) tokens.turns = [];
+    if (typeof tokens.total_input !== 'number') tokens.total_input = 0;
+    if (typeof tokens.total_output !== 'number') tokens.total_output = 0;
 
-  if (existsSync(tokensPath)) {
-    tokens = JSON.parse(readFileSync(tokensPath, 'utf8'));
+    tokens.total_input += inputTokens || 0;
+    tokens.total_output += outputTokens || 0;
+    tokens.turns.push({
+      turn: turn || 0,
+      input: inputTokens || 0,
+      output: outputTokens || 0,
+      timestamp: Date.now()
+    });
+
+    safeWriteJson(tokensPath, tokens);
+    return tokens;
+  } catch {
+    return { total_input: 0, total_output: 0, turns: [] };
   }
-
-  tokens.total_input += inputTokens;
-  tokens.total_output += outputTokens;
-  tokens.turns.push({
-    turn,
-    input: inputTokens,
-    output: outputTokens,
-    timestamp: Date.now()
-  });
-
-  writeFileSync(tokensPath, JSON.stringify(tokens, null, 2));
-
-  return tokens;
 }
 
 // Get token usage from session file
 export function getTokenUsage(sessionId) {
   const tokensPath = join(getSessionDir(sessionId), 'tokens.json');
+  const tokens = safeReadJson(tokensPath, { total_input: 0, total_output: 0, turns: [] });
 
-  if (!existsSync(tokensPath)) {
+  // Ensure valid structure
+  if (!tokens || typeof tokens !== 'object') {
     return { total_input: 0, total_output: 0, turns: [] };
   }
+  if (!Array.isArray(tokens.turns)) tokens.turns = [];
+  if (typeof tokens.total_input !== 'number') tokens.total_input = 0;
+  if (typeof tokens.total_output !== 'number') tokens.total_output = 0;
 
-  return JSON.parse(readFileSync(tokensPath, 'utf8'));
+  return tokens;
 }
 
 // Build recovery context for a crashed session
 export async function buildRecoveryContext(sessionId) {
-  const session = await getSession(sessionId);
-  const summaries = getSummariesFromFile(sessionId);
-  const current = getCurrentState(sessionId);
-  const tokens = getTokenUsage(sessionId);
+  try {
+    const session = await getSession(sessionId);
+    if (!session) return null;
 
-  if (!session) return null;
+    const summaries = getSummariesFromFile(sessionId);
+    const current = getCurrentState(sessionId);
+    const tokens = getTokenUsage(sessionId);
 
-  let context = `[세션 복구 - 비정상 종료 감지됨]\n\n`;
+    let context = `[세션 복구 - 비정상 종료 감지됨]\n\n`;
 
-  // Add summary history
-  if (summaries.length > 0) {
-    context += `## 작업 히스토리:\n`;
-    summaries.forEach(s => {
-      context += `- Turn ${s.turns}: ${s.summary}\n`;
-    });
-    context += `\n`;
+    if (summaries.length > 0) {
+      context += `## 작업 히스토리:\n`;
+      summaries.forEach(s => {
+        if (s && s.turns && s.summary) {
+          context += `- Turn ${s.turns}: ${s.summary}\n`;
+        }
+      });
+      context += `\n`;
+    }
+
+    if (current) {
+      context += `## 마지막 상태 (Turn ${current.turn || '?'}):\n`;
+      context += `- 마지막 도구: ${current.last_tool || 'N/A'}\n`;
+      context += `- 상태: 중단됨\n\n`;
+    }
+
+    context += `## 토큰 사용량: ${tokens.total_input + tokens.total_output} (input: ${tokens.total_input} / output: ${tokens.total_output})\n\n`;
+    context += `위 컨텍스트를 바탕으로 작업을 이어가세요.`;
+
+    return context;
+  } catch {
+    return null;
   }
-
-  // Add last state
-  if (current) {
-    context += `## 마지막 상태 (Turn ${current.turn}):\n`;
-    context += `- 요청: ${current.last_user_message || 'N/A'}\n`;
-    context += `- 마지막 도구: ${current.last_tool || 'N/A'}\n`;
-    context += `- 상태: 중단됨\n\n`;
-  }
-
-  // Add token stats
-  context += `## 토큰 사용량: ${tokens.total_input + tokens.total_output} (input: ${tokens.total_input} / output: ${tokens.total_output})\n\n`;
-  context += `위 컨텍스트를 바탕으로 작업을 이어가세요.`;
-
-  return context;
 }

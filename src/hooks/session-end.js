@@ -13,27 +13,50 @@ process.env.LANG = 'ko_KR.UTF-8';
 process.env.LC_ALL = 'ko_KR.UTF-8';
 
 async function main() {
-  // Read input from stdin
-  let input = '';
-  for await (const chunk of process.stdin) {
-    input += chunk;
+  try {
+    let input = '';
+    for await (const chunk of process.stdin) {
+      input += chunk;
+    }
+
+    if (!input || !input.trim()) {
+      console.log(JSON.stringify({ continue: true }));
+      return;
+    }
+
+    let event;
+    try {
+      event = JSON.parse(input);
+    } catch {
+      console.log(JSON.stringify({ continue: true }));
+      return;
+    }
+
+    if (!event || typeof event !== 'object') {
+      console.log(JSON.stringify({ continue: true }));
+      return;
+    }
+
+    const session_id = event.session_id;
+
+    if (!session_id) {
+      console.log(JSON.stringify({ continue: true }));
+      return;
+    }
+
+    const session = await getSession(session_id);
+
+    if (session && session.status === 'active') {
+      await markSessionCompleted(session_id);
+    }
+
+    console.log(JSON.stringify({ continue: true }));
+  } catch (err) {
+    console.error(`[claude-guard] Error: ${err?.message || 'unknown'}`);
+    console.log(JSON.stringify({ continue: true }));
   }
-
-  const event = JSON.parse(input);
-  const { session_id, reason } = event;
-
-  const session = await getSession(session_id);
-
-  if (session && session.status === 'active') {
-    // Mark as completed if still active
-    await markSessionCompleted(session_id);
-  }
-
-  // Output success
-  console.log(JSON.stringify({ continue: true }));
 }
 
-main().catch(err => {
-  console.error(`[claude-guard] Error: ${err.message}`);
+main().catch(() => {
   console.log(JSON.stringify({ continue: true }));
 });

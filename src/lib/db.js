@@ -1,5 +1,5 @@
 import initSqlJs from 'sql.js';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -7,109 +7,138 @@ const GUARD_DIR = join(homedir(), '.claude-guard');
 const DB_PATH = join(GUARD_DIR, 'guard.db');
 
 // Ensure directory exists
-if (!existsSync(GUARD_DIR)) {
-  mkdirSync(GUARD_DIR, { recursive: true });
+try {
+  if (!existsSync(GUARD_DIR)) {
+    mkdirSync(GUARD_DIR, { recursive: true });
+  }
+} catch (e) {
+  // Will fail later if really broken
 }
 
 let db = null;
+let dbInitialized = false;
 
 // Initialize database
 async function initDb() {
-  if (db) return db;
+  if (db && dbInitialized) return db;
 
-  const SQL = await initSqlJs();
-
-  // Load existing database or create new
-  if (existsSync(DB_PATH)) {
-    const buffer = readFileSync(DB_PATH);
-    db = new SQL.Database(buffer);
-  } else {
-    db = new SQL.Database();
-  }
-
-  // Initialize schema
-  db.run(`
-    -- Sessions table
-    CREATE TABLE IF NOT EXISTS sessions (
-      id TEXT PRIMARY KEY,
-      project_path TEXT,
-      started_at INTEGER NOT NULL,
-      ended_at INTEGER,
-      status TEXT DEFAULT 'active',
-      total_turns INTEGER DEFAULT 0,
-      last_summary_turn INTEGER DEFAULT 0
-    );
-
-    -- Token usage table
-    CREATE TABLE IF NOT EXISTS token_usage (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      turn INTEGER NOT NULL,
-      timestamp INTEGER NOT NULL,
-      input_tokens INTEGER DEFAULT 0,
-      output_tokens INTEGER DEFAULT 0,
-      model TEXT,
-      FOREIGN KEY (session_id) REFERENCES sessions(id)
-    );
-
-    -- Summaries table
-    CREATE TABLE IF NOT EXISTS summaries (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      turn_start INTEGER NOT NULL,
-      turn_end INTEGER NOT NULL,
-      summary TEXT NOT NULL,
-      files_read TEXT,
-      files_modified TEXT,
-      tokens_used INTEGER DEFAULT 0,
-      created_at INTEGER NOT NULL,
-      FOREIGN KEY (session_id) REFERENCES sessions(id)
-    );
-  `);
-
-  // Create indexes
   try {
-    db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id)`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)`);
-  } catch (e) {
-    // Indexes might already exist
-  }
+    const SQL = await initSqlJs();
 
-  saveDb();
-  return db;
+    // Load existing database or create new
+    if (existsSync(DB_PATH)) {
+      try {
+        const buffer = readFileSync(DB_PATH);
+        db = new SQL.Database(buffer);
+      } catch (e) {
+        // DB file corrupted, create new
+        console.error('[claude-guard] DB corrupted, creating new');
+        try { unlinkSync(DB_PATH); } catch {}
+        db = new SQL.Database();
+      }
+    } else {
+      db = new SQL.Database();
+    }
+
+    // Initialize schema
+    try {
+      db.run(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          id TEXT PRIMARY KEY,
+          project_path TEXT,
+          started_at INTEGER NOT NULL,
+          ended_at INTEGER,
+          status TEXT DEFAULT 'active',
+          total_turns INTEGER DEFAULT 0,
+          last_summary_turn INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS token_usage (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL,
+          turn INTEGER NOT NULL,
+          timestamp INTEGER NOT NULL,
+          input_tokens INTEGER DEFAULT 0,
+          output_tokens INTEGER DEFAULT 0,
+          model TEXT,
+          FOREIGN KEY (session_id) REFERENCES sessions(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS summaries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL,
+          turn_start INTEGER NOT NULL,
+          turn_end INTEGER NOT NULL,
+          summary TEXT NOT NULL,
+          files_read TEXT,
+          files_modified TEXT,
+          tokens_used INTEGER DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (session_id) REFERENCES sessions(id)
+        );
+      `);
+
+      // Create indexes (ignore errors if exist)
+      try { db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)`); } catch {}
+      try { db.run(`CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id)`); } catch {}
+      try { db.run(`CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)`); } catch {}
+    } catch (e) {
+      // Schema already exists or other error
+    }
+
+    saveDb();
+    dbInitialized = true;
+    return db;
+  } catch (e) {
+    console.error('[claude-guard] DB init failed:', e.message);
+    return null;
+  }
 }
 
 // Save database to file
 function saveDb() {
-  if (!db) return;
-  const data = db.export();
-  const buffer = Buffer.from(data);
-  writeFileSync(DB_PATH, buffer);
-}
-
-// Helper to run query and get all results
-function queryAll(sql, params = []) {
-  const stmt = db.prepare(sql);
-  stmt.bind(params);
-  const results = [];
-  while (stmt.step()) {
-    results.push(stmt.getAsObject());
+  if (!db) return false;
+  try {
+    const data = db.export();
+    const buffer = Buffer.from(data);
+    writeFileSync(DB_PATH, buffer);
+    return true;
+  } catch (e) {
+    return false;
   }
-  stmt.free();
-  return results;
 }
 
-// Helper to run query and get one result
+// Safe query execution
+function queryAll(sql, params = []) {
+  if (!db) return [];
+  try {
+    const stmt = db.prepare(sql);
+    stmt.bind(params);
+    const results = [];
+    while (stmt.step()) {
+      results.push(stmt.getAsObject());
+    }
+    stmt.free();
+    return results;
+  } catch (e) {
+    return [];
+  }
+}
+
 function queryOne(sql, params = []) {
   const results = queryAll(sql, params);
   return results[0] || null;
 }
 
-// Helper to run insert/update
 function run(sql, params = []) {
-  db.run(sql, params);
-  saveDb();
+  if (!db) return false;
+  try {
+    db.run(sql, params);
+    saveDb();
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 export { db, GUARD_DIR, DB_PATH, initDb, saveDb };
@@ -121,38 +150,48 @@ export async function getActiveSessions() {
 }
 
 export async function getSession(sessionId) {
+  if (!sessionId) return null;
   await initDb();
   return queryOne('SELECT * FROM sessions WHERE id = ?', [sessionId]);
 }
 
 export async function createSession(sessionId, projectPath) {
+  if (!sessionId) return false;
   await initDb();
-  run(`INSERT INTO sessions (id, project_path, started_at, status) VALUES (?, ?, ?, 'active')`,
-    [sessionId, projectPath, Date.now()]);
+  return run(`INSERT OR REPLACE INTO sessions (id, project_path, started_at, status) VALUES (?, ?, ?, 'active')`,
+    [sessionId, projectPath || '', Date.now()]);
 }
 
 export async function updateSession(sessionId, updates) {
+  if (!sessionId || !updates || typeof updates !== 'object') return false;
   await initDb();
-  const fields = Object.keys(updates).map(k => `${k} = ?`).join(', ');
-  const values = [...Object.values(updates), sessionId];
-  run(`UPDATE sessions SET ${fields} WHERE id = ?`, values);
+
+  const keys = Object.keys(updates).filter(k => k && updates[k] !== undefined);
+  if (keys.length === 0) return false;
+
+  const fields = keys.map(k => `${k} = ?`).join(', ');
+  const values = [...keys.map(k => updates[k]), sessionId];
+  return run(`UPDATE sessions SET ${fields} WHERE id = ?`, values);
 }
 
 export async function markSessionCompleted(sessionId) {
+  if (!sessionId) return false;
   await initDb();
-  run(`UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?`, [Date.now(), sessionId]);
+  return run(`UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?`, [Date.now(), sessionId]);
 }
 
 export async function markSessionCrashed(sessionId) {
+  if (!sessionId) return false;
   await initDb();
-  run(`UPDATE sessions SET status = 'crashed', ended_at = ? WHERE id = ?`, [Date.now(), sessionId]);
+  return run(`UPDATE sessions SET status = 'crashed', ended_at = ? WHERE id = ?`, [Date.now(), sessionId]);
 }
 
 // Token functions
 export async function addTokenUsage(sessionId, turn, inputTokens, outputTokens, model) {
+  if (!sessionId) return false;
   await initDb();
-  run(`INSERT INTO token_usage (session_id, turn, timestamp, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?, ?, ?)`,
-    [sessionId, turn, Date.now(), inputTokens, outputTokens, model]);
+  return run(`INSERT INTO token_usage (session_id, turn, timestamp, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?, ?, ?)`,
+    [sessionId, turn || 0, Date.now(), inputTokens || 0, outputTokens || 0, model || 'unknown']);
 }
 
 export async function getTokenStats(sessionId = null, fromDate = null, toDate = null) {
@@ -186,12 +225,21 @@ export async function getTokenStats(sessionId = null, fromDate = null, toDate = 
 
 // Summary functions
 export async function addSummary(sessionId, turnStart, turnEnd, summary, filesRead, filesModified, tokensUsed) {
+  if (!sessionId) return false;
   await initDb();
-  run(`INSERT INTO summaries (session_id, turn_start, turn_end, summary, files_read, files_modified, tokens_used, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [sessionId, turnStart, turnEnd, summary, JSON.stringify(filesRead), JSON.stringify(filesModified), tokensUsed, Date.now()]);
+
+  let filesReadStr = '[]';
+  let filesModifiedStr = '[]';
+
+  try { filesReadStr = JSON.stringify(filesRead || []); } catch {}
+  try { filesModifiedStr = JSON.stringify(filesModified || []); } catch {}
+
+  return run(`INSERT INTO summaries (session_id, turn_start, turn_end, summary, files_read, files_modified, tokens_used, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [sessionId, turnStart || 0, turnEnd || 0, summary || '', filesReadStr, filesModifiedStr, tokensUsed || 0, Date.now()]);
 }
 
 export async function getSummaries(sessionId) {
+  if (!sessionId) return [];
   await initDb();
   return queryAll(`SELECT * FROM summaries WHERE session_id = ? ORDER BY turn_start ASC`, [sessionId]);
 }
@@ -205,5 +253,5 @@ export async function getSessionCount() {
 
 export async function getRecentSessions(limit = 5) {
   await initDb();
-  return queryAll(`SELECT id, project_path, status, started_at, total_turns FROM sessions ORDER BY started_at DESC LIMIT ?`, [limit]);
+  return queryAll(`SELECT id, project_path, status, started_at, total_turns FROM sessions ORDER BY started_at DESC LIMIT ?`, [limit || 5]);
 }

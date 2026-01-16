@@ -15,67 +15,105 @@ process.env.LANG = 'ko_KR.UTF-8';
 process.env.LC_ALL = 'ko_KR.UTF-8';
 
 async function main() {
-  // Read input from stdin
-  let input = '';
-  for await (const chunk of process.stdin) {
-    input += chunk;
-  }
+  try {
+    // Read input from stdin
+    let input = '';
+    for await (const chunk of process.stdin) {
+      input += chunk;
+    }
 
-  const event = JSON.parse(input);
-  const { session_id, cwd } = event;
+    if (!input || !input.trim()) {
+      console.log(JSON.stringify({ continue: true }));
+      return;
+    }
 
-  // Initialize current session FIRST
-  const { isNew, session } = await initSession(session_id, cwd);
+    let event;
+    try {
+      event = JSON.parse(input);
+    } catch {
+      console.log(JSON.stringify({ continue: true }));
+      return;
+    }
 
-  // Check for crashed sessions (conservative approach)
-  const activeSessions = await getActiveSessions();
-  const crashedSessions = [];
+    if (!event || typeof event !== 'object') {
+      console.log(JSON.stringify({ continue: true }));
+      return;
+    }
 
-  for (const s of activeSessions) {
-    // Skip current session
-    if (s.id === session_id) continue;
+    const session_id = event.session_id;
+    const cwd = event.cwd || '';
 
-    const current = getCurrentState(s.id);
+    if (!session_id) {
+      console.log(JSON.stringify({ continue: true }));
+      return;
+    }
 
-    // Only mark as crashed if:
-    // 1. Has current.json (was actually used)
-    // 2. Last update was > 10 minutes ago
-    if (current && current.updated_at) {
-      const lastUpdate = new Date(current.updated_at).getTime();
-      const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
+    // Initialize current session FIRST
+    await initSession(session_id, cwd);
 
-      if (lastUpdate < tenMinutesAgo) {
-        crashedSessions.push(s);
-        await markSessionCrashed(s.id);
+    // Check for crashed sessions (conservative approach)
+    let activeSessions = [];
+    try {
+      activeSessions = await getActiveSessions();
+    } catch {
+      activeSessions = [];
+    }
+
+    const crashedSessions = [];
+
+    for (const s of activeSessions) {
+      if (!s || !s.id) continue;
+      if (s.id === session_id) continue;
+
+      try {
+        const current = getCurrentState(s.id);
+
+        // Only mark as crashed if:
+        // 1. Has current.json (was actually used)
+        // 2. Last update was > 10 minutes ago
+        if (current && current.updated_at) {
+          const lastUpdate = new Date(current.updated_at).getTime();
+          if (!isNaN(lastUpdate)) {
+            const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
+            if (lastUpdate < tenMinutesAgo) {
+              crashedSessions.push(s);
+              await markSessionCrashed(s.id);
+            }
+          }
+        }
+      } catch {
+        // Ignore errors for individual sessions
       }
     }
-    // Sessions without current.json are likely just initialized, skip them
-  }
 
-  // Build output
-  const output = {
-    continue: true
-  };
+    // Build output
+    const output = { continue: true };
 
-  // If there was a recent crash, inject recovery context
-  if (crashedSessions.length > 0) {
-    const lastCrashed = crashedSessions[crashedSessions.length - 1];
-    const recoveryContext = await buildRecoveryContext(lastCrashed.id);
+    // If there was a recent crash, inject recovery context
+    if (crashedSessions.length > 0) {
+      try {
+        const lastCrashed = crashedSessions[crashedSessions.length - 1];
+        const recoveryContext = await buildRecoveryContext(lastCrashed.id);
 
-    if (recoveryContext) {
-      output.hookSpecificOutput = {
-        hookEventName: 'SessionStart',
-        additionalContext: recoveryContext
-      };
-      console.error(`\n[claude-guard] 이전 세션 복구: ${lastCrashed.id.slice(0, 8)}...\n`);
+        if (recoveryContext) {
+          output.hookSpecificOutput = {
+            hookEventName: 'SessionStart',
+            additionalContext: recoveryContext
+          };
+          console.error(`\n[claude-guard] 이전 세션 복구: ${lastCrashed.id.slice(0, 8)}...\n`);
+        }
+      } catch {
+        // Ignore recovery errors
+      }
     }
-  }
 
-  console.log(JSON.stringify(output));
+    console.log(JSON.stringify(output));
+  } catch (err) {
+    console.error(`[claude-guard] Error: ${err?.message || 'unknown'}`);
+    console.log(JSON.stringify({ continue: true }));
+  }
 }
 
-main().catch(err => {
-  console.error(`[claude-guard] Error: ${err.message}`);
-  // Don't exit with error, just continue
+main().catch(() => {
   console.log(JSON.stringify({ continue: true }));
 });
