@@ -4,8 +4,7 @@
 
 import { existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import { initDb, getSummaries, getRecentSessions, GUARD_DIR } from '../lib/db.js';
-import { getTokenUsage } from '../lib/session.js';
+import { initDb, getSummaries, getRecentSessions, getSessionTokenStats, GUARD_DIR } from '../lib/db.js';
 
 export async function exportSession(args) {
   await initDb();
@@ -74,10 +73,26 @@ function sanitizeFilename(name) {
 
 async function generateMarkdown(session, customName) {
   const summaries = await getSummaries(session.id);
-  const tokens = getTokenUsage(session.id);
+  const tokens = await getSessionTokenStats(session.id);
 
   const projectName = session.project_path?.split(/[/\\]/).pop() || 'Unknown Project';
-  const title = customName || `세션: ${projectName}`;
+
+  // Generate title from first summary or custom name
+  let title = customName;
+  if (!title && summaries.length > 0) {
+    const firstSummary = summaries[0]?.summary || '';
+    // Clean up summary for title
+    title = firstSummary
+      .replace(/^(Read |Modified |Created |Ran: |Searched |최종: )/, '')
+      .split(/[/\\]/).pop()  // Get filename if path
+      .slice(0, 50);
+    if (title) {
+      title = `${projectName}: ${title}`;
+    }
+  }
+  if (!title) {
+    title = `세션: ${projectName}`;
+  }
 
   let md = `# ${title}\n\n`;
 

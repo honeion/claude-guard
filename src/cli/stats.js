@@ -3,7 +3,7 @@
  */
 
 import { getSessionStats, getPeriodStats, getTotalStats, getDailyBreakdown, formatStats } from '../lib/token-tracker.js';
-import { initDb, getRecentSessions } from '../lib/db.js';
+import { initDb, getRecentSessionsWithStats } from '../lib/db.js';
 
 export async function stats(args = []) {
   try {
@@ -92,20 +92,30 @@ async function showTotalStats() {
     const stats = await getTotalStats();
     console.log(formatStats(stats));
 
-    // Show recent sessions
-    const recentSessions = await getRecentSessions(5);
+    // Show recent sessions with token stats
+    const recentSessions = await getRecentSessionsWithStats(10);
 
     if (recentSessions && recentSessions.length > 0) {
       console.log('\n--- 최근 세션 ---\n');
+      console.log('ID        Status      Turns   Tokens       Title');
+      console.log('--------  ----------  ------  -----------  --------------------------------');
 
       for (const s of recentSessions) {
         if (!s) continue;
-        const date = s.started_at ? new Date(s.started_at).toLocaleString() : 'N/A';
-        const project = s.project_path?.split(/[/\\]/).pop() || 'N/A';
         const id = s.id?.slice(0, 8) || '????????';
         const status = (s.status || 'unknown').padEnd(10);
-        const turns = s.total_turns || 0;
-        console.log(`  ${id}  ${status}  ${turns} turns  ${project}  ${date}`);
+        const turns = String(s.total_turns || 0).padStart(6);
+        const totalTokens = ((s.total_input || 0) + (s.total_output || 0)).toLocaleString().padStart(11);
+
+        // Extract title from first summary or use project name
+        let title = s.first_summary || '';
+        if (!title) {
+          title = s.project_path?.split(/[/\\]/).pop() || 'N/A';
+        }
+        // Truncate and clean title
+        title = title.replace(/^(Read |Modified |Created |Ran: )/, '').slice(0, 32);
+
+        console.log(`${id}  ${status}  ${turns}  ${totalTokens}  ${title}`);
       }
     }
   } catch (err) {

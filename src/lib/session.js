@@ -227,6 +227,25 @@ export function getTokenUsage(sessionId) {
   return tokens;
 }
 
+// Update meta.json status (sync DB and JSON)
+export function updateMetaStatus(sessionId, status, additionalFields = {}) {
+  try {
+    const metaPath = join(getSessionDir(sessionId), 'meta.json');
+    let meta = safeReadJson(metaPath, null);
+
+    if (meta) {
+      meta.status = status;
+      meta.ended_at = additionalFields.ended_at || new Date().toISOString();
+      Object.assign(meta, additionalFields);
+      safeWriteJson(metaPath, meta);
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 // Build recovery context for a crashed session
 export async function buildRecoveryContext(sessionId) {
   try {

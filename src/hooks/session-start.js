@@ -8,7 +8,7 @@
  */
 
 import { getActiveSessions, markSessionCrashed } from '../lib/db.js';
-import { initSession, getCurrentState, buildRecoveryContext } from '../lib/session.js';
+import { initSession, getCurrentState, buildRecoveryContext, updateMetaStatus } from '../lib/session.js';
 
 // Force UTF-8
 process.env.LANG = 'ko_KR.UTF-8';
@@ -78,6 +78,7 @@ async function main() {
             if (lastUpdate < tenMinutesAgo) {
               crashedSessions.push(s);
               await markSessionCrashed(s.id);
+              updateMetaStatus(s.id, 'crashed');
             }
           }
         }

@@ -255,3 +255,37 @@ export async function getRecentSessions(limit = 5) {
   await initDb();
   return queryAll(`SELECT id, project_path, status, started_at, total_turns FROM sessions ORDER BY started_at DESC LIMIT ?`, [limit || 5]);
 }
+
+// Get recent sessions with token stats and first summary
+export async function getRecentSessionsWithStats(limit = 5) {
+  await initDb();
+  return queryAll(`
+    SELECT
+      s.id,
+      s.project_path,
+      s.status,
+      s.started_at,
+      s.total_turns,
+      COALESCE(SUM(t.input_tokens), 0) as total_input,
+      COALESCE(SUM(t.output_tokens), 0) as total_output,
+      (SELECT summary FROM summaries WHERE session_id = s.id ORDER BY turn_start ASC LIMIT 1) as first_summary
+    FROM sessions s
+    LEFT JOIN token_usage t ON s.id = t.session_id
+    GROUP BY s.id
+    ORDER BY s.started_at DESC
+    LIMIT ?
+  `, [limit || 5]);
+}
+
+// Get token stats for a specific session from DB
+export async function getSessionTokenStats(sessionId) {
+  if (!sessionId) return { total_input: 0, total_output: 0 };
+  await initDb();
+  return queryOne(`
+    SELECT
+      COALESCE(SUM(input_tokens), 0) as total_input,
+      COALESCE(SUM(output_tokens), 0) as total_output
+    FROM token_usage
+    WHERE session_id = ?
+  `, [sessionId]) || { total_input: 0, total_output: 0 };
+}

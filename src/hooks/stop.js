@@ -7,8 +7,8 @@
  * - Mark session as completed
  */
 
-import { getSession, markSessionCompleted, addSummary, addTokenUsage } from '../lib/db.js';
-import { getCurrentState, appendSummary as appendSummaryToFile } from '../lib/session.js';
+import { getSession, markSessionCompleted, addSummary, addTokenUsage, updateSession } from '../lib/db.js';
+import { getCurrentState, appendSummary as appendSummaryToFile, updateMetaStatus } from '../lib/session.js';
 import { readFileSync, existsSync } from 'fs';
 
 // Force UTF-8
@@ -16,22 +16,25 @@ process.env.LANG = 'ko_KR.UTF-8';
 process.env.LC_ALL = 'ko_KR.UTF-8';
 
 /**
- * Extract all unique token usage from transcript file
+ * Extract token usage from transcript file
+ * NOTE: input_tokens is the total context size for each request, not incremental.
+ * We use the LAST message's input_tokens as the total context used,
+ * and SUM all output_tokens since each response is separate output.
  */
 function extractAllTokensFromTranscript(transcriptPath) {
-  let totalInput = 0;
+  let lastInputTokens = 0;
   let totalOutput = 0;
   let model = 'unknown';
   let messageCount = 0;
 
   if (!transcriptPath || !existsSync(transcriptPath)) {
-    return { totalInput, totalOutput, model, messageCount };
+    return { totalInput: 0, totalOutput: 0, model, messageCount };
   }
 
   try {
     const content = readFileSync(transcriptPath, 'utf8');
     if (!content || !content.trim()) {
-      return { totalInput, totalOutput, model, messageCount };
+      return { totalInput: 0, totalOutput: 0, model, messageCount };
     }
 
     const lines = content.trim().split('\n');
@@ -48,9 +51,13 @@ function extractAllTokensFromTranscript(transcriptPath) {
           seenIds.add(msgId);
 
           const usage = entry.message.usage;
-          totalInput += (usage.input_tokens || 0) +
-                       (usage.cache_creation_input_tokens || 0) +
-                       (usage.cache_read_input_tokens || 0);
+          // Keep track of the latest input_tokens (context size grows over conversation)
+          const currentInput = (usage.input_tokens || 0) +
+                              (usage.cache_creation_input_tokens || 0) +
+                              (usage.cache_read_input_tokens || 0);
+          lastInputTokens = currentInput; // Use last value, not sum
+
+          // Sum output tokens (each response is separate)
           totalOutput += usage.output_tokens || 0;
           model = entry.message.model || model;
         }
@@ -64,7 +71,7 @@ function extractAllTokensFromTranscript(transcriptPath) {
     // File error
   }
 
-  return { totalInput, totalOutput, model, messageCount };
+  return { totalInput: lastInputTokens, totalOutput, model, messageCount };
 }
 
 async function main() {
@@ -136,12 +143,15 @@ async function main() {
 
         appendSummaryToFile(session_id, summary);
         await addSummary(session_id, lastSummaryTurn + 1, currentTurn, summary.summary, summary.files_read, summary.files_modified, 0);
+        // Update last_summary_turn to prevent overlapping summaries on resume
+        await updateSession(session_id, { last_summary_turn: currentTurn });
       } catch {
         // Ignore summary errors
       }
     }
 
     await markSessionCompleted(session_id);
+    updateMetaStatus(session_id, 'completed');
     console.log(JSON.stringify({ continue: true }));
   } catch (err) {
     console.error(`[claude-guard] Error: ${err?.message || 'unknown'}`);

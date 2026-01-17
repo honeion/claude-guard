@@ -7,6 +7,7 @@
  */
 
 import { getSession, markSessionCompleted } from '../lib/db.js';
+import { updateMetaStatus } from '../lib/session.js';
 
 // Force UTF-8
 process.env.LANG = 'ko_KR.UTF-8';
@@ -48,6 +49,7 @@ async function main() {
 
     if (session && session.status === 'active') {
       await markSessionCompleted(session_id);
+      updateMetaStatus(session_id, 'completed');
     }
 
     console.log(JSON.stringify({ continue: true }));
