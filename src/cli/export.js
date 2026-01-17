@@ -4,20 +4,18 @@
 
 import { existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import { initDb, getSummaries, getRecentSessions, getSessionTokenStats, GUARD_DIR } from '../lib/db.js';
+import { getSummaries, getRecentSessions, getSessionTokenStats, GUARD_DIR } from '../lib/db.js';
 
-export async function exportSession(args) {
-  await initDb();
+export function exportSession(args) {
   const options = parseArgs(args);
 
   // Find session
+  const recentSessions = getRecentSessions(100);
   let session;
-  const recentSessions = await getRecentSessions(100);
 
   if (options.session) {
     session = recentSessions.find(s => s.id.startsWith(options.session));
   } else {
-    // Get most recent session
     session = recentSessions[0];
   }
 
@@ -27,15 +25,12 @@ export async function exportSession(args) {
   }
 
   // Generate markdown
-  const md = await generateMarkdown(session, options.name);
+  const md = generateMarkdown(session, options.name);
 
   // Determine output path
-  let outputDir;
-  if (options.here) {
-    outputDir = join(process.cwd(), '.claude-guard', 'exports');
-  } else {
-    outputDir = join(GUARD_DIR, 'exports');
-  }
+  let outputDir = options.here
+    ? join(process.cwd(), '.claude-guard', 'exports')
+    : join(GUARD_DIR, 'exports');
 
   if (!existsSync(outputDir)) {
     mkdirSync(outputDir, { recursive: true });
@@ -53,17 +48,11 @@ export async function exportSession(args) {
 
 function parseArgs(args) {
   const options = {};
-
   for (const arg of args) {
-    if (arg.startsWith('--session=')) {
-      options.session = arg.split('=')[1];
-    } else if (arg.startsWith('--name=')) {
-      options.name = arg.split('=')[1];
-    } else if (arg === '--here') {
-      options.here = true;
-    }
+    if (arg.startsWith('--session=')) options.session = arg.split('=')[1];
+    else if (arg.startsWith('--name=')) options.name = arg.split('=')[1];
+    else if (arg === '--here') options.here = true;
   }
-
   return options;
 }
 
@@ -71,28 +60,17 @@ function sanitizeFilename(name) {
   return name.replace(/[^a-zA-Z0-9가-힣_-]/g, '_');
 }
 
-async function generateMarkdown(session, customName) {
-  const summaries = await getSummaries(session.id);
-  const tokens = await getSessionTokenStats(session.id);
+function generateMarkdown(session, customName) {
+  const summaries = getSummaries(session.id);
+  const tokens = getSessionTokenStats(session.id);
+  const projectName = session.project_path?.split(/[/\\]/).pop() || 'Unknown';
 
-  const projectName = session.project_path?.split(/[/\\]/).pop() || 'Unknown Project';
-
-  // Generate title from first summary or custom name
+  // Generate title
   let title = customName;
   if (!title && summaries.length > 0) {
-    const firstSummary = summaries[0]?.summary || '';
-    // Clean up summary for title
-    title = firstSummary
-      .replace(/^(Read |Modified |Created |Ran: |Searched |최종: )/, '')
-      .split(/[/\\]/).pop()  // Get filename if path
-      .slice(0, 50);
-    if (title) {
-      title = `${projectName}: ${title}`;
-    }
+    title = `${projectName}: ${summaries[0]?.summary?.slice(0, 50) || 'Session'}`;
   }
-  if (!title) {
-    title = `세션: ${projectName}`;
-  }
+  if (!title) title = `세션: ${projectName}`;
 
   let md = `# ${title}\n\n`;
 
@@ -101,60 +79,28 @@ async function generateMarkdown(session, customName) {
   md += `- **프로젝트**: \`${session.project_path || 'N/A'}\`\n`;
   md += `- **상태**: ${session.status}\n`;
   md += `- **시작**: ${new Date(session.started_at).toLocaleString()}\n`;
-  md += `- **총 턴**: ${session.total_turns}\n`;
-  md += `- **총 토큰**: ${(tokens.total_input + tokens.total_output).toLocaleString()} (input: ${tokens.total_input.toLocaleString()} / output: ${tokens.total_output.toLocaleString()})\n`;
+  md += `- **토큰**: ${(tokens.total_input + tokens.total_output).toLocaleString()}\n`;
   md += `\n---\n\n`;
 
-  // Work flow
+  // Summaries
   md += `## 작업 흐름\n\n`;
-
   if (summaries.length === 0) {
     md += `_기록된 요약 없음_\n\n`;
   } else {
     for (const s of summaries) {
-      const filesRead = JSON.parse(s.files_read || '[]');
-      const filesModified = JSON.parse(s.files_modified || '[]');
-
-      md += `### Turn ${s.turn_start}-${s.turn_end}\n\n`;
-      md += `${s.summary}\n\n`;
-
-      if (filesRead.length > 0) {
-        md += `- **읽음**: ${filesRead.map(f => `\`${f.split(/[/\\]/).pop()}\``).join(', ')}\n`;
-      }
-      if (filesModified.length > 0) {
-        md += `- **수정함**: ${filesModified.map(f => `\`${f.split(/[/\\]/).pop()}\``).join(', ')}\n`;
-      }
-      md += `- **토큰**: ${s.tokens_used.toLocaleString()}\n\n`;
+      md += `- ${s.summary || 'N/A'}`;
+      if (s.tokens) md += ` (${(s.tokens.input || 0) + (s.tokens.output || 0)} tokens)`;
+      md += `\n`;
     }
   }
 
-  // Files summary
-  const allFilesModified = new Set();
+  // Token summary
+  md += `\n---\n\n## 토큰 사용량\n\n`;
+  md += `- Input: ${tokens.total_input.toLocaleString()}\n`;
+  md += `- Output: ${tokens.total_output.toLocaleString()}\n`;
+  md += `- Total: ${(tokens.total_input + tokens.total_output).toLocaleString()}\n`;
 
-  for (const s of summaries) {
-    const fm = JSON.parse(s.files_modified || '[]');
-    fm.forEach(f => allFilesModified.add(f));
-  }
-
-  if (allFilesModified.size > 0) {
-    md += `---\n\n## 수정된 파일\n\n`;
-    for (const f of allFilesModified) {
-      md += `- \`${f}\`\n`;
-    }
-    md += `\n`;
-  }
-
-  // Token breakdown
-  md += `---\n\n## 토큰 사용량\n\n`;
-  md += `| 항목 | 값 |\n`;
-  md += `|------|----|\n`;
-  md += `| Input 토큰 | ${tokens.total_input.toLocaleString()} |\n`;
-  md += `| Output 토큰 | ${tokens.total_output.toLocaleString()} |\n`;
-  md += `| 총 토큰 | ${(tokens.total_input + tokens.total_output).toLocaleString()} |\n`;
-  md += `\n`;
-
-  // Footer
-  md += `---\n\n_Generated by claude-guard_\n`;
+  md += `\n---\n\n_Generated by claude-guard_\n`;
 
   return md;
 }

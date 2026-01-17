@@ -1,64 +1,53 @@
 #!/usr/bin/env node
 
 /**
- * SessionEnd Hook
- * - Final cleanup
- * - Ensure session is marked properly
+ * SessionEnd Hook - Final cleanup (minimal)
  */
 
-import { getSession, markSessionCompleted } from '../lib/db.js';
-import { updateMetaStatus } from '../lib/session.js';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
 
-// Force UTF-8
-process.env.LANG = 'ko_KR.UTF-8';
-process.env.LC_ALL = 'ko_KR.UTF-8';
+const SESSIONS_FILE = join(homedir(), '.claude-guard', 'sessions.json');
 
-async function main() {
+let input = '';
+const chunks = [];
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => chunks.push(chunk));
+process.stdin.on('end', () => {
+  input = chunks.join('');
+  main();
+});
+
+function main() {
   try {
-    let input = '';
-    for await (const chunk of process.stdin) {
-      input += chunk;
-    }
-
-    if (!input || !input.trim()) {
-      console.log(JSON.stringify({ continue: true }));
+    if (!input?.trim()) {
+      process.stdout.write('{"continue":true}');
       return;
     }
 
-    let event;
-    try {
-      event = JSON.parse(input);
-    } catch {
-      console.log(JSON.stringify({ continue: true }));
-      return;
-    }
-
-    if (!event || typeof event !== 'object') {
-      console.log(JSON.stringify({ continue: true }));
-      return;
-    }
-
-    const session_id = event.session_id;
+    const event = JSON.parse(input);
+    const session_id = event?.session_id;
 
     if (!session_id) {
-      console.log(JSON.stringify({ continue: true }));
+      process.stdout.write('{"continue":true}');
       return;
     }
 
-    const session = await getSession(session_id);
-
-    if (session && session.status === 'active') {
-      await markSessionCompleted(session_id);
-      updateMetaStatus(session_id, 'completed');
+    // Mark session as completed if still active
+    if (existsSync(SESSIONS_FILE)) {
+      try {
+        const sessions = JSON.parse(readFileSync(SESSIONS_FILE, 'utf8'));
+        if (sessions[session_id]?.status === 'active') {
+          sessions[session_id].status = 'completed';
+          sessions[session_id].ended_at = Date.now();
+          writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
+        }
+      } catch {}
     }
 
-    console.log(JSON.stringify({ continue: true }));
-  } catch (err) {
-    console.error(`[claude-guard] Error: ${err?.message || 'unknown'}`);
-    console.log(JSON.stringify({ continue: true }));
+    process.stdout.write('{"continue":true}');
+  } catch {
+    process.stdout.write('{"continue":true}');
   }
 }
-
-main().catch(() => {
-  console.log(JSON.stringify({ continue: true }));
-});

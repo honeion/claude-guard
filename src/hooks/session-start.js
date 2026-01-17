@@ -1,120 +1,136 @@
 #!/usr/bin/env node
 
 /**
- * SessionStart Hook
- * - Check for crashed sessions (conservatively)
- * - Inject recovery context if needed
- * - Initialize new session
+ * SessionStart Hook - LIGHTWEIGHT VERSION
+ * Check for crashed sessions, initialize new session
  */
 
-import { getActiveSessions, markSessionCrashed } from '../lib/db.js';
-import { initSession, getCurrentState, buildRecoveryContext, updateMetaStatus } from '../lib/session.js';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
 
-// Force UTF-8
-process.env.LANG = 'ko_KR.UTF-8';
-process.env.LC_ALL = 'ko_KR.UTF-8';
+const GUARD_DIR = join(homedir(), '.claude-guard');
+const SESSIONS_DIR = join(GUARD_DIR, 'sessions');
+const SESSIONS_FILE = join(GUARD_DIR, 'sessions.json');
 
-async function main() {
-  try {
-    // Read input from stdin
-    let input = '';
-    for await (const chunk of process.stdin) {
-      input += chunk;
-    }
-
-    if (!input || !input.trim()) {
-      console.log(JSON.stringify({ continue: true }));
-      return;
-    }
-
-    let event;
-    try {
-      event = JSON.parse(input);
-    } catch {
-      console.log(JSON.stringify({ continue: true }));
-      return;
-    }
-
-    if (!event || typeof event !== 'object') {
-      console.log(JSON.stringify({ continue: true }));
-      return;
-    }
-
-    const session_id = event.session_id;
-    const cwd = event.cwd || '';
-
-    if (!session_id) {
-      console.log(JSON.stringify({ continue: true }));
-      return;
-    }
-
-    // Initialize current session FIRST
-    await initSession(session_id, cwd);
-
-    // Check for crashed sessions (conservative approach)
-    let activeSessions = [];
-    try {
-      activeSessions = await getActiveSessions();
-    } catch {
-      activeSessions = [];
-    }
-
-    const crashedSessions = [];
-
-    for (const s of activeSessions) {
-      if (!s || !s.id) continue;
-      if (s.id === session_id) continue;
-
-      try {
-        const current = getCurrentState(s.id);
-
-        // Only mark as crashed if:
-        // 1. Has current.json (was actually used)
-        // 2. Last update was > 10 minutes ago
-        if (current && current.updated_at) {
-          const lastUpdate = new Date(current.updated_at).getTime();
-          if (!isNaN(lastUpdate)) {
-            const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
-            if (lastUpdate < tenMinutesAgo) {
-              crashedSessions.push(s);
-              await markSessionCrashed(s.id);
-              updateMetaStatus(s.id, 'crashed');
-            }
-          }
-        }
-      } catch {
-        // Ignore errors for individual sessions
-      }
-    }
-
-    // Build output
-    const output = { continue: true };
-
-    // If there was a recent crash, inject recovery context
-    if (crashedSessions.length > 0) {
-      try {
-        const lastCrashed = crashedSessions[crashedSessions.length - 1];
-        const recoveryContext = await buildRecoveryContext(lastCrashed.id);
-
-        if (recoveryContext) {
-          output.hookSpecificOutput = {
-            hookEventName: 'SessionStart',
-            additionalContext: recoveryContext
-          };
-          console.error(`\n[claude-guard] 이전 세션 복구: ${lastCrashed.id.slice(0, 8)}...\n`);
-        }
-      } catch {
-        // Ignore recovery errors
-      }
-    }
-
-    console.log(JSON.stringify(output));
-  } catch (err) {
-    console.error(`[claude-guard] Error: ${err?.message || 'unknown'}`);
-    console.log(JSON.stringify({ continue: true }));
-  }
+// Ensure directories exist
+if (!existsSync(GUARD_DIR)) {
+  try { mkdirSync(GUARD_DIR, { recursive: true }); } catch {}
+}
+if (!existsSync(SESSIONS_DIR)) {
+  try { mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
 }
 
-main().catch(() => {
-  console.log(JSON.stringify({ continue: true }));
+function readJson(path, fallback) {
+  try {
+    if (!existsSync(path)) return fallback;
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch { return fallback; }
+}
+
+function writeJson(path, data) {
+  try { writeFileSync(path, JSON.stringify(data, null, 2)); } catch {}
+}
+
+let input = '';
+const chunks = [];
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => chunks.push(chunk));
+process.stdin.on('end', () => {
+  input = chunks.join('');
+  main();
 });
+
+function main() {
+  try {
+    if (!input?.trim()) {
+      process.stdout.write('{"continue":true}');
+      return;
+    }
+
+    const event = JSON.parse(input);
+    const session_id = event?.session_id;
+    const cwd = event?.cwd || '';
+
+    if (!session_id) {
+      process.stdout.write('{"continue":true}');
+      return;
+    }
+
+    // Load sessions
+    const sessions = readJson(SESSIONS_FILE, {});
+
+    // Check for crashed sessions (active with old current.json)
+    let crashedSession = null;
+    const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
+
+    for (const [id, s] of Object.entries(sessions)) {
+      if (id === session_id) continue;
+      if (s.status !== 'active') continue;
+
+      const currentPath = join(SESSIONS_DIR, id, 'current.json');
+      const current = readJson(currentPath, null);
+
+      if (current?.ts && current.ts < tenMinutesAgo) {
+        // Mark as crashed
+        sessions[id].status = 'crashed';
+        sessions[id].ended_at = Date.now();
+        crashedSession = { id, ...s, current };
+      }
+    }
+
+    // Create/update current session
+    if (!sessions[session_id]) {
+      sessions[session_id] = {
+        id: session_id,
+        project_path: cwd,
+        started_at: Date.now(),
+        status: 'active'
+      };
+    } else {
+      sessions[session_id].status = 'active';
+    }
+
+    // Ensure session directory
+    const sessionDir = join(SESSIONS_DIR, session_id);
+    if (!existsSync(sessionDir)) {
+      mkdirSync(sessionDir, { recursive: true });
+    }
+
+    writeJson(SESSIONS_FILE, sessions);
+
+    // Output with optional recovery context
+    const output = { continue: true };
+
+    if (crashedSession) {
+      // Build minimal recovery context
+      const summariesPath = join(SESSIONS_DIR, crashedSession.id, 'summaries.jsonl');
+      let summaries = [];
+      try {
+        if (existsSync(summariesPath)) {
+          summaries = readFileSync(summariesPath, 'utf8')
+            .split('\n')
+            .filter(l => l.trim())
+            .slice(-3) // Last 3 summaries only
+            .map(l => { try { return JSON.parse(l); } catch { return null; } })
+            .filter(Boolean);
+        }
+      } catch {}
+
+      let context = `[세션 복구]\n`;
+      if (summaries.length > 0) {
+        context += summaries.map(s => `- ${s.summary || ''}`).join('\n');
+      }
+      context += `\n마지막: ${crashedSession.current?.tool || 'N/A'}`;
+
+      output.hookSpecificOutput = {
+        hookEventName: 'SessionStart',
+        additionalContext: context
+      };
+    }
+
+    process.stdout.write(JSON.stringify(output));
+  } catch {
+    process.stdout.write('{"continue":true}');
+  }
+}

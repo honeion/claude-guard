@@ -1,291 +1,261 @@
-import initSqlJs from 'sql.js';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
+/**
+ * File-based storage (no sql.js, no WASM)
+ * All data stored as JSON files for minimal overhead
+ */
+
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
-const GUARD_DIR = join(homedir(), '.claude-guard');
-const DB_PATH = join(GUARD_DIR, 'guard.db');
+export const GUARD_DIR = join(homedir(), '.claude-guard');
+const SESSIONS_FILE = join(GUARD_DIR, 'sessions.json');
+const TOKENS_FILE = join(GUARD_DIR, 'tokens.json');
 
-// Ensure directory exists
-try {
-  if (!existsSync(GUARD_DIR)) {
-    mkdirSync(GUARD_DIR, { recursive: true });
-  }
-} catch (e) {
-  // Will fail later if really broken
+// Ensure directory exists (sync, runs once)
+if (!existsSync(GUARD_DIR)) {
+  try { mkdirSync(GUARD_DIR, { recursive: true }); } catch {}
 }
 
-let db = null;
-let dbInitialized = false;
+// ============ Helper functions ============
 
-// Initialize database
-async function initDb() {
-  if (db && dbInitialized) return db;
-
+function readJson(path, fallback = null) {
   try {
-    const SQL = await initSqlJs();
-
-    // Load existing database or create new
-    if (existsSync(DB_PATH)) {
-      try {
-        const buffer = readFileSync(DB_PATH);
-        db = new SQL.Database(buffer);
-      } catch (e) {
-        // DB file corrupted, create new
-        console.error('[claude-guard] DB corrupted, creating new');
-        try { unlinkSync(DB_PATH); } catch {}
-        db = new SQL.Database();
-      }
-    } else {
-      db = new SQL.Database();
-    }
-
-    // Initialize schema
-    try {
-      db.run(`
-        CREATE TABLE IF NOT EXISTS sessions (
-          id TEXT PRIMARY KEY,
-          project_path TEXT,
-          started_at INTEGER NOT NULL,
-          ended_at INTEGER,
-          status TEXT DEFAULT 'active',
-          total_turns INTEGER DEFAULT 0,
-          last_summary_turn INTEGER DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS token_usage (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          session_id TEXT NOT NULL,
-          turn INTEGER NOT NULL,
-          timestamp INTEGER NOT NULL,
-          input_tokens INTEGER DEFAULT 0,
-          output_tokens INTEGER DEFAULT 0,
-          model TEXT,
-          FOREIGN KEY (session_id) REFERENCES sessions(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS summaries (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          session_id TEXT NOT NULL,
-          turn_start INTEGER NOT NULL,
-          turn_end INTEGER NOT NULL,
-          summary TEXT NOT NULL,
-          files_read TEXT,
-          files_modified TEXT,
-          tokens_used INTEGER DEFAULT 0,
-          created_at INTEGER NOT NULL,
-          FOREIGN KEY (session_id) REFERENCES sessions(id)
-        );
-      `);
-
-      // Create indexes (ignore errors if exist)
-      try { db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)`); } catch {}
-      try { db.run(`CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id)`); } catch {}
-      try { db.run(`CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)`); } catch {}
-    } catch (e) {
-      // Schema already exists or other error
-    }
-
-    saveDb();
-    dbInitialized = true;
-    return db;
-  } catch (e) {
-    console.error('[claude-guard] DB init failed:', e.message);
-    return null;
+    if (!existsSync(path)) return fallback;
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return fallback;
   }
 }
 
-// Save database to file
-function saveDb() {
-  if (!db) return false;
+function writeJson(path, data) {
   try {
-    const data = db.export();
-    const buffer = Buffer.from(data);
-    writeFileSync(DB_PATH, buffer);
+    writeFileSync(path, JSON.stringify(data, null, 2));
     return true;
-  } catch (e) {
+  } catch {
     return false;
   }
 }
 
-// Safe query execution
-function queryAll(sql, params = []) {
-  if (!db) return [];
+// ============ Sessions ============
+
+function getSessions() {
+  return readJson(SESSIONS_FILE, {});
+}
+
+function saveSessions(sessions) {
+  return writeJson(SESSIONS_FILE, sessions);
+}
+
+export function getSession(sessionId) {
+  if (!sessionId) return null;
+  const sessions = getSessions();
+  return sessions[sessionId] || null;
+}
+
+export function createSession(sessionId, projectPath) {
+  if (!sessionId) return false;
+  const sessions = getSessions();
+  sessions[sessionId] = {
+    id: sessionId,
+    project_path: projectPath || '',
+    started_at: Date.now(),
+    status: 'active',
+    total_turns: 0,
+    last_summary_turn: 0
+  };
+  return saveSessions(sessions);
+}
+
+export function updateSession(sessionId, updates) {
+  if (!sessionId || !updates) return false;
+  const sessions = getSessions();
+  if (!sessions[sessionId]) return false;
+  Object.assign(sessions[sessionId], updates);
+  return saveSessions(sessions);
+}
+
+export function getActiveSessions() {
+  const sessions = getSessions();
+  return Object.values(sessions).filter(s => s.status === 'active');
+}
+
+export function markSessionCompleted(sessionId) {
+  return updateSession(sessionId, { status: 'completed', ended_at: Date.now() });
+}
+
+export function markSessionCrashed(sessionId) {
+  return updateSession(sessionId, { status: 'crashed', ended_at: Date.now() });
+}
+
+// ============ Tokens ============
+
+function getTokensData() {
+  return readJson(TOKENS_FILE, { sessions: {}, daily: {} });
+}
+
+function saveTokensData(data) {
+  return writeJson(TOKENS_FILE, data);
+}
+
+export function addTokenUsage(sessionId, turn, inputTokens, outputTokens, model) {
+  if (!sessionId) return false;
+  const data = getTokensData();
+
+  if (!data.sessions[sessionId]) {
+    data.sessions[sessionId] = { input: 0, output: 0, turns: 0 };
+  }
+
+  data.sessions[sessionId].input = inputTokens || 0; // Last context size
+  data.sessions[sessionId].output += outputTokens || 0;
+  data.sessions[sessionId].turns = turn || 0;
+  data.sessions[sessionId].model = model;
+  data.sessions[sessionId].updated_at = Date.now();
+
+  // Daily aggregation
+  const today = new Date().toISOString().split('T')[0];
+  if (!data.daily[today]) {
+    data.daily[today] = { input: 0, output: 0, sessions: 0 };
+  }
+
+  return saveTokensData(data);
+}
+
+export function finalizeSessionTokens(sessionId, inputTokens, outputTokens) {
+  if (!sessionId) return false;
+  const data = getTokensData();
+
+  if (!data.sessions[sessionId]) {
+    data.sessions[sessionId] = { input: 0, output: 0, turns: 0 };
+  }
+
+  data.sessions[sessionId].input = inputTokens || 0;
+  data.sessions[sessionId].output = outputTokens || 0;
+  data.sessions[sessionId].finalized = true;
+  data.sessions[sessionId].updated_at = Date.now();
+
+  // Add to daily
+  const today = new Date().toISOString().split('T')[0];
+  if (!data.daily[today]) {
+    data.daily[today] = { input: 0, output: 0, sessions: 0 };
+  }
+  data.daily[today].input += inputTokens || 0;
+  data.daily[today].output += outputTokens || 0;
+  data.daily[today].sessions += 1;
+
+  return saveTokensData(data);
+}
+
+export function getTokenStats(sessionId = null, fromDate = null, toDate = null) {
+  const data = getTokensData();
+
+  if (sessionId) {
+    const s = data.sessions[sessionId];
+    return s ? {
+      total_turns: s.turns || 0,
+      total_input: s.input || 0,
+      total_output: s.output || 0,
+      total_tokens: (s.input || 0) + (s.output || 0)
+    } : { total_turns: 0, total_input: 0, total_output: 0, total_tokens: 0 };
+  }
+
+  // Aggregate from daily data
+  let totalInput = 0, totalOutput = 0, totalSessions = 0;
+
+  for (const [date, stats] of Object.entries(data.daily)) {
+    const d = new Date(date).getTime();
+    if (fromDate && d < fromDate) continue;
+    if (toDate && d > toDate) continue;
+    totalInput += stats.input || 0;
+    totalOutput += stats.output || 0;
+    totalSessions += stats.sessions || 0;
+  }
+
+  return {
+    total_turns: totalSessions,
+    total_input: totalInput,
+    total_output: totalOutput,
+    total_tokens: totalInput + totalOutput
+  };
+}
+
+export function getSessionCount() {
+  const sessions = getSessions();
+  return Object.keys(sessions).length;
+}
+
+export function getRecentSessions(limit = 5) {
+  const sessions = getSessions();
+  return Object.values(sessions)
+    .sort((a, b) => (b.started_at || 0) - (a.started_at || 0))
+    .slice(0, limit);
+}
+
+export function getRecentSessionsWithStats(limit = 5) {
+  const sessions = getRecentSessions(limit);
+  const tokensData = getTokensData();
+
+  return sessions.map(s => {
+    const t = tokensData.sessions[s.id] || {};
+    return {
+      ...s,
+      total_input: t.input || 0,
+      total_output: t.output || 0
+    };
+  });
+}
+
+export function getSessionTokenStats(sessionId) {
+  const data = getTokensData();
+  const s = data.sessions[sessionId];
+  return s ? { total_input: s.input || 0, total_output: s.output || 0 }
+           : { total_input: 0, total_output: 0 };
+}
+
+export function getDailyStats(days = 7) {
+  const data = getTokensData();
+  const results = [];
+  const now = Date.now();
+  const dayMs = 24 * 60 * 60 * 1000;
+
+  for (let i = 0; i < days; i++) {
+    const date = new Date(now - i * dayMs).toISOString().split('T')[0];
+    const stats = data.daily[date] || { input: 0, output: 0, sessions: 0 };
+    results.push({
+      date,
+      total_input: stats.input,
+      total_output: stats.output,
+      sessions: stats.sessions
+    });
+  }
+
+  return results.reverse();
+}
+
+// ============ Summaries (stored per-session in files) ============
+
+export function addSummary(sessionId, turnStart, turnEnd, summary, filesRead, filesModified, tokensUsed) {
+  // Summaries are stored in session files, not here
+  // This is just for compatibility - actual storage in session.js
+  return true;
+}
+
+export function getSummaries(sessionId) {
+  // Read from session file
+  const sessionDir = join(GUARD_DIR, 'sessions', sessionId);
+  const summariesPath = join(sessionDir, 'summaries.jsonl');
+
   try {
-    const stmt = db.prepare(sql);
-    stmt.bind(params);
-    const results = [];
-    while (stmt.step()) {
-      results.push(stmt.getAsObject());
-    }
-    stmt.free();
-    return results;
-  } catch (e) {
+    if (!existsSync(summariesPath)) return [];
+    const content = readFileSync(summariesPath, 'utf8');
+    return content.split('\n')
+      .filter(line => line.trim())
+      .map(line => { try { return JSON.parse(line); } catch { return null; } })
+      .filter(Boolean);
+  } catch {
     return [];
   }
 }
 
-function queryOne(sql, params = []) {
-  const results = queryAll(sql, params);
-  return results[0] || null;
-}
-
-function run(sql, params = []) {
-  if (!db) return false;
-  try {
-    db.run(sql, params);
-    saveDb();
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
-
-export { db, GUARD_DIR, DB_PATH, initDb, saveDb };
-
-// Session functions
-export async function getActiveSessions() {
-  await initDb();
-  return queryAll(`SELECT * FROM sessions WHERE status = 'active' AND ended_at IS NULL`);
-}
-
-export async function getSession(sessionId) {
-  if (!sessionId) return null;
-  await initDb();
-  return queryOne('SELECT * FROM sessions WHERE id = ?', [sessionId]);
-}
-
-export async function createSession(sessionId, projectPath) {
-  if (!sessionId) return false;
-  await initDb();
-  return run(`INSERT OR REPLACE INTO sessions (id, project_path, started_at, status) VALUES (?, ?, ?, 'active')`,
-    [sessionId, projectPath || '', Date.now()]);
-}
-
-export async function updateSession(sessionId, updates) {
-  if (!sessionId || !updates || typeof updates !== 'object') return false;
-  await initDb();
-
-  const keys = Object.keys(updates).filter(k => k && updates[k] !== undefined);
-  if (keys.length === 0) return false;
-
-  const fields = keys.map(k => `${k} = ?`).join(', ');
-  const values = [...keys.map(k => updates[k]), sessionId];
-  return run(`UPDATE sessions SET ${fields} WHERE id = ?`, values);
-}
-
-export async function markSessionCompleted(sessionId) {
-  if (!sessionId) return false;
-  await initDb();
-  return run(`UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?`, [Date.now(), sessionId]);
-}
-
-export async function markSessionCrashed(sessionId) {
-  if (!sessionId) return false;
-  await initDb();
-  return run(`UPDATE sessions SET status = 'crashed', ended_at = ? WHERE id = ?`, [Date.now(), sessionId]);
-}
-
-// Token functions
-export async function addTokenUsage(sessionId, turn, inputTokens, outputTokens, model) {
-  if (!sessionId) return false;
-  await initDb();
-  return run(`INSERT INTO token_usage (session_id, turn, timestamp, input_tokens, output_tokens, model) VALUES (?, ?, ?, ?, ?, ?)`,
-    [sessionId, turn || 0, Date.now(), inputTokens || 0, outputTokens || 0, model || 'unknown']);
-}
-
-export async function getTokenStats(sessionId = null, fromDate = null, toDate = null) {
-  await initDb();
-  let sql = `
-    SELECT
-      COUNT(*) as total_turns,
-      COALESCE(SUM(input_tokens), 0) as total_input,
-      COALESCE(SUM(output_tokens), 0) as total_output,
-      COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens
-    FROM token_usage
-    WHERE 1=1
-  `;
-  const params = [];
-
-  if (sessionId) {
-    sql += ' AND session_id = ?';
-    params.push(sessionId);
-  }
-  if (fromDate) {
-    sql += ' AND timestamp >= ?';
-    params.push(fromDate);
-  }
-  if (toDate) {
-    sql += ' AND timestamp <= ?';
-    params.push(toDate);
-  }
-
-  return queryOne(sql, params) || { total_turns: 0, total_input: 0, total_output: 0, total_tokens: 0 };
-}
-
-// Summary functions
-export async function addSummary(sessionId, turnStart, turnEnd, summary, filesRead, filesModified, tokensUsed) {
-  if (!sessionId) return false;
-  await initDb();
-
-  let filesReadStr = '[]';
-  let filesModifiedStr = '[]';
-
-  try { filesReadStr = JSON.stringify(filesRead || []); } catch {}
-  try { filesModifiedStr = JSON.stringify(filesModified || []); } catch {}
-
-  return run(`INSERT INTO summaries (session_id, turn_start, turn_end, summary, files_read, files_modified, tokens_used, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [sessionId, turnStart || 0, turnEnd || 0, summary || '', filesReadStr, filesModifiedStr, tokensUsed || 0, Date.now()]);
-}
-
-export async function getSummaries(sessionId) {
-  if (!sessionId) return [];
-  await initDb();
-  return queryAll(`SELECT * FROM summaries WHERE session_id = ? ORDER BY turn_start ASC`, [sessionId]);
-}
-
-// Stats helper
-export async function getSessionCount() {
-  await initDb();
-  const result = queryOne('SELECT COUNT(*) as count FROM sessions');
-  return result?.count || 0;
-}
-
-export async function getRecentSessions(limit = 5) {
-  await initDb();
-  return queryAll(`SELECT id, project_path, status, started_at, total_turns FROM sessions ORDER BY started_at DESC LIMIT ?`, [limit || 5]);
-}
-
-// Get recent sessions with token stats and first summary
-export async function getRecentSessionsWithStats(limit = 5) {
-  await initDb();
-  return queryAll(`
-    SELECT
-      s.id,
-      s.project_path,
-      s.status,
-      s.started_at,
-      s.total_turns,
-      COALESCE(SUM(t.input_tokens), 0) as total_input,
-      COALESCE(SUM(t.output_tokens), 0) as total_output,
-      (SELECT summary FROM summaries WHERE session_id = s.id ORDER BY turn_start ASC LIMIT 1) as first_summary
-    FROM sessions s
-    LEFT JOIN token_usage t ON s.id = t.session_id
-    GROUP BY s.id
-    ORDER BY s.started_at DESC
-    LIMIT ?
-  `, [limit || 5]);
-}
-
-// Get token stats for a specific session from DB
-export async function getSessionTokenStats(sessionId) {
-  if (!sessionId) return { total_input: 0, total_output: 0 };
-  await initDb();
-  return queryOne(`
-    SELECT
-      COALESCE(SUM(input_tokens), 0) as total_input,
-      COALESCE(SUM(output_tokens), 0) as total_output
-    FROM token_usage
-    WHERE session_id = ?
-  `, [sessionId]) || { total_input: 0, total_output: 0 };
-}
+// Backward compatibility - these do nothing now
+export async function initDb() { return true; }
+export function saveDb() { return true; }
