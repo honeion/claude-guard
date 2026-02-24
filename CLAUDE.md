@@ -36,10 +36,11 @@ claude-guard export --here
 
 ### Hook System
 
-1. **SessionStart** (`src/hooks/session-start.js`): Checks for crashed sessions, initializes new session
+1. **SessionStart** (`src/hooks/session-start.js`): Crash recovery, compact recovery, session init
 2. **PostToolUse** (`src/hooks/post-tool-use.js`): Only writes `current.json` (50 bytes, ~1ms)
-3. **Stop** (`src/hooks/stop.js`): Token extraction from transcript, session finalization
-4. **SessionEnd** (`src/hooks/session-end.js`): Final cleanup
+3. **Stop** (`src/hooks/stop.js`): Token extraction, turns.jsonl, summaries.jsonl
+4. **PreCompact** (`src/hooks/pre-compact.js`): Parse transcript, generate compact-context.md
+5. **SessionEnd** (`src/hooks/session-end.js`): Final cleanup
 
 ### Data Storage
 
@@ -49,7 +50,11 @@ claude-guard export --here
 ├── tokens.json       # Token usage per session and daily aggregates
 └── sessions/{id}/
     ├── current.json      # Last tool state (for crash recovery)
-    └── summaries.jsonl   # Session summaries
+    ├── turns.jsonl       # Per-turn tool/token data
+    ├── summaries.jsonl   # Tool sequence summaries
+    └── compact/
+        ├── latest.md     # Latest compact context
+        └── YYYYMMDD_hhmmss_compact-context.md
 ```
 
 ### Key Files

@@ -2,8 +2,14 @@
  * Show token usage statistics
  */
 
-import { getSessionStats, getPeriodStats, getTotalStats, getDailyBreakdown, formatStats } from '../lib/token-tracker.js';
+import { existsSync, readFileSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
+import { getSessionStats, getPeriodStats, getTotalStats, getDailyBreakdown, formatStats, calculateCost } from '../lib/token-tracker.js';
 import { getRecentSessionsWithStats, getRecentSessions } from '../lib/db.js';
+
+const GUARD_DIR = join(homedir(), '.claude-guard');
+const SESSIONS_DIR = join(GUARD_DIR, 'sessions');
 
 export function stats(args = []) {
   try {
@@ -59,6 +65,45 @@ function showSessionStats(sessionId) {
 
   const stats = getSessionStats(session.id);
   console.log(formatStats(stats));
+
+  // Show turn-by-turn breakdown
+  const turnsPath = join(SESSIONS_DIR, session.id, 'turns.jsonl');
+  if (existsSync(turnsPath)) {
+    try {
+      const content = readFileSync(turnsPath, 'utf8');
+      const turns = content.split('\n')
+        .filter(line => line.trim())
+        .map(line => { try { return JSON.parse(line); } catch { return null; } })
+        .filter(Boolean);
+
+      if (turns.length > 0) {
+        console.log('\n--- 채팅별 토큰 사용량 (delta) ---\n');
+        console.log('시간                 | Δ Input    | Δ Output   | Δ Total    | 누적 Total | 도구');
+        console.log('---------------------|------------|------------|------------|------------|------------');
+
+        let prevInput = 0, prevOutput = 0;
+        for (const turn of turns) {
+          const time = turn.time ? new Date(turn.time).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'N/A';
+          const date = turn.time ? new Date(turn.time).toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' }) : '';
+          const deltaIn = Math.max(0, (turn.input || 0) - prevInput);
+          const deltaOut = Math.max(0, (turn.output || 0) - prevOutput);
+          const deltaTotal = deltaIn + deltaOut;
+          const cumTotal = (turn.input || 0) + (turn.output || 0);
+          const tool = (turn.tool || '-').slice(0, 10).padEnd(10);
+
+          const dIn = `+${deltaIn.toLocaleString()}`.padStart(10);
+          const dOut = `+${deltaOut.toLocaleString()}`.padStart(10);
+          const dTot = `+${deltaTotal.toLocaleString()}`.padStart(10);
+          const cum = cumTotal.toLocaleString().padStart(10);
+
+          console.log(`${date} ${time}    | ${dIn} | ${dOut} | ${dTot} | ${cum} | ${tool}`);
+
+          prevInput = turn.input || 0;
+          prevOutput = turn.output || 0;
+        }
+      }
+    } catch {}
+  }
 }
 
 function showPeriodStats(period) {
@@ -76,19 +121,25 @@ function showTotalStats() {
   const recentSessions = getRecentSessionsWithStats(10);
 
   if (recentSessions && recentSessions.length > 0) {
-    console.log('\n--- 최근 세션 ---\n');
-    console.log('ID        Status      Tokens       Project');
-    console.log('--------  ----------  -----------  --------------------------------');
+    console.log('\n--- 세션별 토큰 사용량 ---\n');
+    console.log('ID        | 상태       | Input      | Output     | Total      | 비용       | 프로젝트');
+    console.log('----------|------------|------------|------------|------------|------------|------------------');
 
     for (const s of recentSessions) {
       if (!s) continue;
       const id = s.id?.slice(0, 8) || '????????';
-      const status = (s.status || 'unknown').padEnd(10);
-      const totalTokens = ((s.total_input || 0) + (s.total_output || 0)).toLocaleString().padStart(11);
-      const project = s.project_path?.split(/[/\\]/).pop()?.slice(0, 32) || 'N/A';
+      const status = (s.status || 'unknown').slice(0, 10).padEnd(10);
+      const input = (s.total_input || 0).toLocaleString().padStart(10);
+      const output = (s.total_output || 0).toLocaleString().padStart(10);
+      const total = ((s.total_input || 0) + (s.total_output || 0)).toLocaleString().padStart(10);
+      const cost = calculateCost(s.total_input || 0, s.total_output || 0);
+      const costStr = `$${cost.total.toFixed(4)}`.padStart(10);
+      const project = s.project_path?.split(/[/\\]/).pop()?.slice(0, 16) || 'N/A';
 
-      console.log(`${id}  ${status}  ${totalTokens}  ${project}`);
+      console.log(`${id}  | ${status} | ${input} | ${output} | ${total} | ${costStr} | ${project}`);
     }
+
+    console.log('\n세션 상세: claude-guard stats --session=<ID>');
   }
 }
 

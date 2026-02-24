@@ -44,6 +44,11 @@ async function main() {
       await import('../hooks/stop.js');
       break;
 
+    case 'pre-compact':
+      // Internal hook command
+      await import('../hooks/pre-compact.js');
+      break;
+
     case 'finalize':
       // Internal hook command
       await import('../hooks/session-end.js');

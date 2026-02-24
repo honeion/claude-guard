@@ -5,7 +5,7 @@
  * Check for crashed sessions, initialize new session
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -51,6 +51,15 @@ function main() {
     const event = JSON.parse(input);
     const session_id = event?.session_id;
     const cwd = event?.cwd || '';
+    // source 필드로 구분: startup, resume, compact, clear
+    const eventType = event?.source || event?.type || 'startup';
+
+    // 디버그 로깅
+    const debugPath = join(GUARD_DIR, 'session-start-debug.log');
+    try {
+      const debugLine = `${new Date().toISOString()} | type=${eventType} | session=${session_id} | keys=${Object.keys(event).join(',')}\n`;
+      appendFileSync(debugPath, debugLine);
+    } catch {}
 
     if (!session_id) {
       process.stdout.write('{"continue":true}');
@@ -102,26 +111,60 @@ function main() {
     // Output with optional recovery context
     const output = { continue: true };
 
-    if (crashedSession) {
-      // Build minimal recovery context
-      const summariesPath = join(SESSIONS_DIR, crashedSession.id, 'summaries.jsonl');
-      let summaries = [];
+    // Helper to read summaries
+    function readSummaries(sessionId) {
+      const summariesPath = join(SESSIONS_DIR, sessionId, 'summaries.jsonl');
       try {
         if (existsSync(summariesPath)) {
-          summaries = readFileSync(summariesPath, 'utf8')
+          return readFileSync(summariesPath, 'utf8')
             .split('\n')
             .filter(l => l.trim())
-            .slice(-3) // Last 3 summaries only
+            .slice(-5) // Last 5 summaries
             .map(l => { try { return JSON.parse(l); } catch { return null; } })
             .filter(Boolean);
         }
       } catch {}
+      return [];
+    }
 
-      let context = `[세션 복구]\n`;
-      if (summaries.length > 0) {
-        context += summaries.map(s => `- ${s.summary || ''}`).join('\n');
+    // Compact: inject context from compact-context.md
+    if (eventType === 'compact') {
+      const compactDir = join(SESSIONS_DIR, session_id, 'compact');
+      const latestPath = join(compactDir, 'latest.md');
+
+      let context = '';
+
+      // compact-context.md 읽기
+      try {
+        if (existsSync(latestPath)) {
+          context = readFileSync(latestPath, 'utf8');
+        }
+      } catch {}
+
+      // 없으면 summaries fallback
+      if (!context) {
+        const summaries = readSummaries(session_id);
+        if (summaries.length > 0) {
+          context = `[Compact 복구 - 이전 작업 흐름]\n`;
+          context += summaries.map(s => `• ${s.summary || ''}`).join('\n');
+        }
       }
-      context += `\n마지막: ${crashedSession.current?.tool || 'N/A'}`;
+
+      if (context) {
+        output.hookSpecificOutput = {
+          hookEventName: 'SessionStart',
+          additionalContext: context
+        };
+      }
+    }
+    // Crashed session recovery
+    else if (crashedSession) {
+      const summaries = readSummaries(crashedSession.id);
+      let context = `[크래시 복구]\n`;
+      if (summaries.length > 0) {
+        context += summaries.map(s => `• ${s.summary || ''}`).join('\n');
+      }
+      context += `\n마지막 도구: ${crashedSession.current?.tool || 'N/A'}`;
 
       output.hookSpecificOutput = {
         hookEventName: 'SessionStart',

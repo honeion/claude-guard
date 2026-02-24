@@ -14,7 +14,7 @@ const CLI_PATH = resolve(join(import.meta.dirname, '..', '..', 'src', 'cli', 'in
 
 const HOOKS_CONFIG = {
   SessionStart: [{
-    matcher: 'startup|resume',
+    matcher: 'startup|resume|compact',
     hooks: [{
       type: 'command',
       command: `node "${CLI_PATH}" session-start`

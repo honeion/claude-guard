@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Stop Hook - Token tracking and session finalization
+ * Stop Hook - Token tracking, session finalization, and summary generation
  * This is where heavy operations happen (once per response, not per tool)
  */
 
@@ -13,6 +13,25 @@ const GUARD_DIR = join(homedir(), '.claude-guard');
 const SESSIONS_DIR = join(GUARD_DIR, 'sessions');
 const SESSIONS_FILE = join(GUARD_DIR, 'sessions.json');
 const TOKENS_FILE = join(GUARD_DIR, 'tokens.json');
+
+function generateSummary(turns) {
+  if (!turns || turns.length === 0) return null;
+
+  const tools = [];
+  for (const turn of turns.slice(-10)) { // Last 10 turns
+    const tool = turn.tool;
+    if (!tool) continue;
+
+    // Simplify MCP tool names
+    const toolName = tool.replace(/^mcp__[^_]+__/, '');
+    tools.push(toolName);
+  }
+
+  if (tools.length === 0) return null;
+
+  // Return tool sequence (e.g., "Read → Edit → Bash → Task")
+  return tools.join(' → ');
+}
 
 function readJson(path, fallback) {
   try {
@@ -123,21 +142,52 @@ function main() {
       writeJson(SESSIONS_FILE, sessions);
     }
 
-    // Append summary
+    // Append turn data with timestamp
     const sessionDir = join(SESSIONS_DIR, session_id);
     if (existsSync(sessionDir)) {
+      const turnsPath = join(sessionDir, 'turns.jsonl');
       const summariesPath = join(sessionDir, 'summaries.jsonl');
       const currentPath = join(sessionDir, 'current.json');
       const current = readJson(currentPath, {});
 
-      const summary = {
+      const turnData = {
         ts: Date.now(),
-        summary: current.tool ? `${current.tool}` : 'session end',
-        tokens: { input: tokens.input, output: tokens.output }
+        time: new Date().toISOString(),
+        tool: current.tool || null,
+        input: tokens.input,
+        output: tokens.output,
+        total: tokens.input + tokens.output,
+        model: tokens.model
       };
 
       try {
-        appendFileSync(summariesPath, JSON.stringify(summary) + '\n');
+        appendFileSync(turnsPath, JSON.stringify(turnData) + '\n');
+      } catch {}
+
+      // Generate and save summary
+      try {
+        // Read recent turns for summary
+        const turnsContent = existsSync(turnsPath)
+          ? readFileSync(turnsPath, 'utf8')
+          : '';
+        const turns = turnsContent
+          .trim()
+          .split('\n')
+          .filter(l => l)
+          .map(l => { try { return JSON.parse(l); } catch { return null; } })
+          .filter(Boolean);
+
+        const summary = generateSummary(turns);
+        if (summary) {
+          const summaryData = {
+            ts: Date.now(),
+            time: new Date().toISOString(),
+            summary,
+            turns: turns.length,
+            tokens: { input: tokens.input, output: tokens.output }
+          };
+          appendFileSync(summariesPath, JSON.stringify(summaryData) + '\n');
+        }
       } catch {}
     }
 
